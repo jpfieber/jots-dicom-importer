@@ -40,6 +40,7 @@ export const DicomTags = {
     PhotometricInterpretation: 'x00280004',
     Rows: 'x00280010',
     Columns: 'x00280011',
+    InstanceNumber: 'x00200013', // Add InstanceNumber tag
     PixelSpacing: 'x00280030',
     BitsAllocated: 'x00280100',
     BitsStored: 'x00280101',

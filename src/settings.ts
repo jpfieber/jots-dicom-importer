@@ -13,6 +13,7 @@ export interface DICOMHandlerSettings {
     destinationFolderPath: string;
     dicomIdentification: 'extension' | 'noExtension';
     dicomExtension: string;
+    galleryImageWidth: number;
 
     // Folder organization settings
     usePatientFolder: boolean;
@@ -44,6 +45,7 @@ export const DEFAULT_SETTINGS: DICOMHandlerSettings = {
     destinationFolderPath: '',
     dicomIdentification: 'extension',
     dicomExtension: 'dcm',
+    galleryImageWidth: 150,
 
     // Folder organization defaults
     usePatientFolder: false,
@@ -357,6 +359,21 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                         this.plugin.settings.lastFolderPath,
                         this.plugin.settings.destinationFolderPath
                     );
+                }));
+
+        containerEl.createEl('h3', { text: 'Display Settings' });
+
+        new Setting(containerEl)
+            .setName('Gallery Image Width')
+            .setDesc('Set the width in pixels for images in the gallery (default: 150)')
+            .addText(text => text
+                .setValue(String(this.plugin.settings.galleryImageWidth))
+                .onChange(async (value) => {
+                    const width = parseInt(value);
+                    if (!isNaN(width) && width > 0) {
+                        this.plugin.settings.galleryImageWidth = width;
+                        await this.plugin.saveSettings();
+                    }
                 }));
     }
 }

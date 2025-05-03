@@ -161,12 +161,22 @@ export default class DICOMHandlerPlugin extends Plugin {
                 }
             }
 
-            // Get study date from DICOM data and format filename
+            // Get series number and study date for filename
+            const seriesNumber = dicomData.string(DicomTags.SeriesNumber) || '0';
             const studyDate = dicomData.string(DicomTags.StudyDate) || '';
+
+            // Format the filename components
+            const paddedSeriesNum = seriesNumber.padStart(3, '0');
             const formattedDate = studyDate ? studyDate.replace(/(\d{4})(\d{2})(\d{2})/, '$1$2$3') : '';
+
+            // Get the original filename without extension
+            const originalName = file.basename;
+
+            // Create filename: date-series-originalname
             const newFileName = formattedDate
-                ? `${formattedDate} - IMG${file.basename}.${this.settings.imageFormat}`
-                : `IMG${file.basename}.${this.settings.imageFormat}`;
+                ? `${formattedDate}-S${paddedSeriesNum}-${originalName}.${this.settings.imageFormat}`
+                : `S${paddedSeriesNum}-${originalName}.${this.settings.imageFormat}`;
+
             const newPath = `${organizedPath}/${newFileName}`;
 
             // Convert base64 to binary
@@ -174,16 +184,13 @@ export default class DICOMHandlerPlugin extends Plugin {
             const binaryData = Buffer.from(base64Data, 'base64');
 
             await this.app.vault.createBinary(newPath, binaryData);
-
-            // Create metadata note
-            await this.createMetadataNote(dicomData, organizedPath);
         } catch (error) {
             if (error instanceof Error) {
                 console.error(`Failed to convert DICOM: ${error.message}`);
             } else {
                 console.error('Failed to convert DICOM: Unknown error');
             }
-            throw error; // Re-throw to be handled by the bulk conversion process
+            throw error;
         }
     }
 
@@ -280,23 +287,39 @@ export default class DICOMHandlerPlugin extends Plugin {
             const titleDate = studyDate ? `${studyDate} - ` : '';
 
             content += `# ${titleDate}${seriesDesc}\n\n`;
-            content += `This note contains metadata for a DICOM series${studyDate ? ` acquired on ${studyDate}` : ''}.\n`;
+            content += `This note contains metadata for a DICOM series${studyDate ? ` acquired on ${studyDate}` : ''}.\n\n`;
+
+            // Add horizontal rule before gallery
+            content += `---\n\n`;
+
+            // Get all image files in the folder to create gallery
+            const folder = this.app.vault.getAbstractFileByPath(folderPath);
+            if (folder instanceof TFolder) {
+                const imageFiles = folder.children
+                    .filter(file => file instanceof TFile &&
+                        (file.extension === 'png' || file.extension === 'jpg' || file.extension === 'jpeg'))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+
+                if (imageFiles.length > 0) {
+                    content += `## Gallery\n\n`;
+                    const imageWidth = this.settings.galleryImageWidth;
+                    imageFiles.forEach((file, index) => {
+                        content += `![[${file.name}|${imageWidth}]]`;
+                        if (index < imageFiles.length - 1) {
+                            content += ' ';
+                        }
+                    });
+                    content += '\n\n';
+                }
+            }
 
             const folderName = folderPath.split('/').pop() || 'series';
             const notePath = `${folderPath}/${studyDate ? studyDate + ' - ' : ''}${folderName}.md`;
 
             await this.app.vault.create(notePath, content);
         } catch (error) {
-            // Silently handle errors
-        }
-    }
-
-    private isDicomFile(filename: string): boolean {
-        if (this.settings.dicomIdentification === 'extension') {
-            return filename.toLowerCase().endsWith(`.${this.settings.dicomExtension.toLowerCase()}`);
-        } else {
-            // Check if file has no extension
-            return path.extname(filename) === '';
+            console.error('Error creating metadata note:', error);
+            throw error;
         }
     }
 
@@ -331,7 +354,6 @@ export default class DICOMHandlerPlugin extends Plugin {
                 throw new Error('Could not create or access destination folder');
             }
 
-            // Rest of the method remains the same...
             const allFiles = this.app.vault.getAllLoadedFiles();
             const folderFiles = allFiles.filter(file =>
                 file instanceof TFile &&
@@ -350,16 +372,20 @@ export default class DICOMHandlerPlugin extends Plugin {
             let converted = 0;
             const totalFiles = folderFiles.length;
 
-            // Create progress container
+            // Track series by their SeriesInstanceUID
+            const seriesMap = new Map<string, {
+                dicomData: dicomParser.DataSet,
+                folderPath: string
+            }>();
+
+            // Create progress UI
             const progressEl = document.createElement('div');
             progressEl.addClass('dicom-progress');
 
-            // Add text status
             const statusEl = document.createElement('div');
             statusEl.setText(`Importing DICOM files... 0/${totalFiles}`);
             progressEl.appendChild(statusEl);
 
-            // Add progress bar
             const progressBarEl = document.createElement('div');
             progressBarEl.addClass('dicom-progress-bar');
             const progressFillEl = document.createElement('div');
@@ -372,13 +398,27 @@ export default class DICOMHandlerPlugin extends Plugin {
 
             for (const file of folderFiles) {
                 try {
-                    // Create a new TFile with the destination folder
                     const modifiedFile = {
                         ...file,
                         parent: destFolder
                     } as TFile;
 
-                    await this.convertDicomToImage(modifiedFile);
+                    // Read DICOM data
+                    const arrayBuffer = await this.app.vault.readBinary(file);
+                    const dicomData = this.dicomService.parseDicomData(arrayBuffer);
+                    const organizedPath = this.getOrganizedFolderPath(destFolder.path, dicomData);
+
+                    // Store DICOM data for each unique series
+                    const seriesInstanceUID = dicomData.string(DicomTags.SeriesInstanceUID);
+                    if (seriesInstanceUID && !seriesMap.has(seriesInstanceUID)) {
+                        seriesMap.set(seriesInstanceUID, {
+                            dicomData,
+                            folderPath: organizedPath
+                        });
+                    }
+
+                    // Convert the image
+                    await this.convertDicomToImage(modifiedFile, destFolder);
                     converted++;
 
                     // Update progress
@@ -394,6 +434,11 @@ export default class DICOMHandlerPlugin extends Plugin {
                 }
             }
 
+            // Create metadata notes for each series after all files are converted
+            for (const { dicomData, folderPath } of seriesMap.values()) {
+                await this.createMetadataNote(dicomData, folderPath);
+            }
+
             // Remove progress element
             progressEl.remove();
             new Notice(`Successfully imported ${converted} of ${totalFiles} DICOM files to ${destinationFolderPath}`);
@@ -404,6 +449,15 @@ export default class DICOMHandlerPlugin extends Plugin {
             } else {
                 new Notice('Error accessing folders');
             }
+        }
+    }
+
+    private isDicomFile(filename: string): boolean {
+        if (this.settings.dicomIdentification === 'extension') {
+            return filename.toLowerCase().endsWith(`.${this.settings.dicomExtension.toLowerCase()}`);
+        } else {
+            // Check if file has no extension
+            return path.extname(filename) === '';
         }
     }
 
