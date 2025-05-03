@@ -1,0 +1,5 @@
+.settings-indent {
+    margin-left: 24px;
+    border-left: 1px solid var(--background-modifier-border);
+    padding-left: 12px;
+}
