@@ -106,8 +106,8 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Auto Convert')
-            .setDesc('Automatically convert DICOM files when opened')
+            .setName('Auto Import')
+            .setDesc('Automatically import DICOM files when opened')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.autoConvert)
                 .onChange(async (value) => {
@@ -291,11 +291,11 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
         }
 
         // Add folder conversion section
-        containerEl.createEl('h3', { text: 'Bulk Conversion' });
+        containerEl.createEl('h3', { text: 'Bulk Import' });
 
         const folderSetting = new Setting(containerEl)
             .setName('Source Folder')
-            .setDesc('Select the folder containing DICOM files to convert (in your vault)')
+            .setDesc('Select the folder containing DICOM files to import (in your vault)')
             .addText(text => {
                 text.setValue(this.plugin.settings.lastFolderPath)
                     .onChange(async (value) => {
@@ -318,7 +318,7 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
 
         const destFolderSetting = new Setting(containerEl)
             .setName('Destination Folder')
-            .setDesc('Select where to save the converted images (in your vault)')
+            .setDesc('Select where to save the imported images (in your vault)')
             .addText(text => {
                 text.setValue(this.plugin.settings.destinationFolderPath)
                     .onChange(async (value) => {
@@ -340,10 +340,10 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
             });
 
         new Setting(containerEl)
-            .setName('Convert Files')
-            .setDesc('Start converting all DICOM files from source to destination folder')
+            .setName('Import Files')
+            .setDesc('Start importing all DICOM files from source to destination folder')
             .addButton(button => button
-                .setButtonText('Convert All')
+                .setButtonText('Import All')
                 .onClick(async () => {
                     if (!this.plugin.settings.lastFolderPath) {
                         new Notice('Please select a source folder first');

@@ -24,8 +24,8 @@ export default class DICOMHandlerPlugin extends Plugin {
         this.addSettingTab(new DICOMHandlerSettingsTab(this.app, this));
 
         this.addCommand({
-            id: 'convert-dicom-to-image',
-            name: 'Convert DICOM to Image',
+            id: 'import-dicom-to-image',
+            name: 'Import DICOM to Image',
             checkCallback: (checking: boolean) => {
                 const activeFile = this.app.workspace.getActiveFile();
                 if (activeFile?.extension === 'dcm') {
@@ -39,8 +39,8 @@ export default class DICOMHandlerPlugin extends Plugin {
         });
 
         this.addCommand({
-            id: 'convert-folder',
-            name: 'Convert All DICOM Files in Folder',
+            id: 'import-folder',
+            name: 'Import All DICOM Files in Folder',
             callback: async () => {
                 if (!this.settings.lastFolderPath) {
                     new Notice('Please select a source folder in settings first');
@@ -61,7 +61,7 @@ export default class DICOMHandlerPlugin extends Plugin {
     private getOrganizedFolderPath(basePath: string, dataset: dicomParser.DataSet): string {
         const parts: string[] = [basePath];
 
-        // Patient folder handling
+        // Patient folder handling (unchanged)
         if (this.settings.usePatientFolder) {
             const folderParts: string[] = [];
             if (this.settings.includePatientId) {
@@ -83,38 +83,54 @@ export default class DICOMHandlerPlugin extends Plugin {
 
         // Study folder
         if (this.settings.useStudyFolder) {
-            const studyParts: string[] = ['Study'];
+            const studyParts: string[] = [];
 
+            const studyDate = dataset.string(DicomTags.StudyDate);
             const modality = dataset.string(DicomTags.Modality);
             const studyDesc = dataset.string(DicomTags.StudyDescription);
-            const studyDate = dataset.string(DicomTags.StudyDate);
             const studyId = dataset.string(DicomTags.StudyID);
 
-            if (this.settings.includeStudyModality && modality) studyParts.push(modality);
-            if (this.settings.includeStudyDescription && studyDesc) studyParts.push(studyDesc);
+            // Always put date first if available
             if (this.settings.includeStudyDate && studyDate) studyParts.push(studyDate);
-            if (this.settings.includeStudyId && studyId) studyParts.push(studyId);
 
-            parts.push(studyParts.join('-'));
+            // Join date and 'Study' with spaced hyphen, then join rest with regular hyphens
+            const restOfParts: string[] = ['Study'];
+            if (this.settings.includeStudyModality && modality) restOfParts.push(modality);
+            if (this.settings.includeStudyDescription && studyDesc) restOfParts.push(studyDesc);
+            if (this.settings.includeStudyId && studyId) restOfParts.push(studyId);
+
+            const studyFolderName = studyDate
+                ? `${studyDate} - ${restOfParts.join('-')}`
+                : restOfParts.join('-');
+
+            parts.push(studyFolderName);
         }
 
         // Series folder - always include series description if available
         if (this.settings.useSeriesFolder) {
-            const seriesParts: string[] = ['Series'];
+            const seriesParts: string[] = [];
 
+            const seriesDate = dataset.string(DicomTags.SeriesDate);
             const seriesNum = dataset.string(DicomTags.SeriesNumber);
             const seriesDesc = dataset.string(DicomTags.SeriesDescription);
-            const seriesDate = dataset.string(DicomTags.SeriesDate);
 
-            if (this.settings.includeSeriesNumber && seriesNum) seriesParts.push(seriesNum);
-            if (seriesDesc) seriesParts.push(seriesDesc); // Always include series description
-            if (this.settings.includeSeriesDate && seriesDate) seriesParts.push(seriesDate);
+            // Join date and 'Series' with spaced hyphen, then join rest with regular hyphens
+            const restOfParts: string[] = ['Series'];
+            if (this.settings.includeSeriesNumber && seriesNum) restOfParts.push(seriesNum);
+            if (seriesDesc) restOfParts.push(seriesDesc);
 
-            parts.push(seriesParts.join('-'));
+            const seriesFolderName = seriesDate
+                ? `${seriesDate} - ${restOfParts.join('-')}`
+                : restOfParts.join('-');
+
+            parts.push(seriesFolderName);
         }
 
         // Sanitize folder names to be safe for filesystem
-        return parts.map(part => part.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')).join('/');
+        // Don't include / in sanitization since basePath is already a valid path
+        return parts.map(part =>
+            part === basePath ? part : part.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_')
+        ).join('/');
     }
 
     private async convertDicomToImage(file: TFile, destFolder?: TFolder) {
@@ -130,17 +146,17 @@ export default class DICOMHandlerPlugin extends Plugin {
                 destFolder = file.parent;
             }
 
-            // Get organized folder path
+            // Get organized folder path and normalize it
             const basePath = destFolder.path;
             const organizedPath = this.getOrganizedFolderPath(basePath, dicomData);
 
             // Create all necessary folders
-            const folders = organizedPath.split('/');
+            const folders = organizedPath.split('/').filter(part => part.length > 0);
             let currentPath = '';
             for (const folder of folders) {
                 currentPath = currentPath ? `${currentPath}/${folder}` : folder;
-                const folderExists = this.app.vault.getAbstractFileByPath(currentPath);
-                if (!folderExists) {
+                const existing = this.app.vault.getAbstractFileByPath(currentPath);
+                if (!existing) {
                     await this.app.vault.createFolder(currentPath);
                 }
             }
@@ -161,14 +177,13 @@ export default class DICOMHandlerPlugin extends Plugin {
 
             // Create metadata note
             await this.createMetadataNote(dicomData, organizedPath);
-
-            new Notice(`Successfully converted ${file.basename} to ${this.settings.imageFormat.toUpperCase()}`);
         } catch (error) {
             if (error instanceof Error) {
-                new Notice(`Failed to convert DICOM: ${error.message}`);
+                console.error(`Failed to convert DICOM: ${error.message}`);
             } else {
-                new Notice('Failed to convert DICOM: Unknown error');
+                console.error('Failed to convert DICOM: Unknown error');
             }
+            throw error; // Re-throw to be handled by the bulk conversion process
         }
     }
 
@@ -259,15 +274,16 @@ export default class DICOMHandlerPlugin extends Plugin {
             }
             content += '---\n\n';
 
-            // Add basic content
+            // Add basic content with date-first title
             const seriesDesc = dataset.string(DicomTags.SeriesDescription) || 'DICOM Series';
-            const studyDate = dataset.string(DicomTags.StudyDate) || 'unknown date';
+            const studyDate = dataset.string(DicomTags.StudyDate) || '';
+            const titleDate = studyDate ? `${studyDate} - ` : '';
 
-            content += `# ${seriesDesc}\n\n`;
-            content += `This note contains metadata for a DICOM series acquired on ${studyDate}.\n`;
+            content += `# ${titleDate}${seriesDesc}\n\n`;
+            content += `This note contains metadata for a DICOM series${studyDate ? ` acquired on ${studyDate}` : ''}.\n`;
 
             const folderName = folderPath.split('/').pop() || 'series';
-            const notePath = `${folderPath}/${folderName}.md`;
+            const notePath = `${folderPath}/${studyDate ? studyDate + ' - ' : ''}${folderName}.md`;
 
             await this.app.vault.create(notePath, content);
         } catch (error) {
@@ -292,15 +308,30 @@ export default class DICOMHandlerPlugin extends Plugin {
                 throw new Error('Source folder not found in vault');
             }
 
-            // Ensure destination folder exists, create if it doesn't
-            let destFolder = this.app.vault.getAbstractFileByPath(destinationFolderPath);
-            if (!destFolder) {
-                destFolder = await this.app.vault.createFolder(destinationFolderPath);
-            } else if (!(destFolder instanceof TFolder)) {
-                throw new Error('Destination path exists but is not a folder');
+            // Normalize the destination path and ensure each part of the path exists
+            const pathParts = destinationFolderPath.split('/').filter(part => part.length > 0);
+            let currentPath = '';
+            let destFolder: TFolder | null = null;
+
+            for (const part of pathParts) {
+                currentPath = currentPath ? `${currentPath}/${part}` : part;
+                const existing = this.app.vault.getAbstractFileByPath(currentPath);
+
+                if (!existing) {
+                    // Create this part of the path
+                    destFolder = await this.app.vault.createFolder(currentPath);
+                } else if (existing instanceof TFolder) {
+                    destFolder = existing;
+                } else {
+                    throw new Error(`Path exists but is not a folder: ${currentPath}`);
+                }
             }
 
-            // Get all files in the vault
+            if (!destFolder) {
+                throw new Error('Could not create or access destination folder');
+            }
+
+            // Rest of the method remains the same...
             const allFiles = this.app.vault.getAllLoadedFiles();
             const folderFiles = allFiles.filter(file =>
                 file instanceof TFile &&
@@ -316,8 +347,28 @@ export default class DICOMHandlerPlugin extends Plugin {
                 return;
             }
 
-            new Notice(`Converting ${folderFiles.length} DICOM files...`);
             let converted = 0;
+            const totalFiles = folderFiles.length;
+
+            // Create progress container
+            const progressEl = document.createElement('div');
+            progressEl.addClass('dicom-progress');
+
+            // Add text status
+            const statusEl = document.createElement('div');
+            statusEl.setText(`Importing DICOM files... 0/${totalFiles}`);
+            progressEl.appendChild(statusEl);
+
+            // Add progress bar
+            const progressBarEl = document.createElement('div');
+            progressBarEl.addClass('dicom-progress-bar');
+            const progressFillEl = document.createElement('div');
+            progressFillEl.addClass('dicom-progress-bar-fill');
+            progressFillEl.style.width = '0%';
+            progressBarEl.appendChild(progressFillEl);
+            progressEl.appendChild(progressBarEl);
+
+            document.body.appendChild(progressEl);
 
             for (const file of folderFiles) {
                 try {
@@ -329,15 +380,24 @@ export default class DICOMHandlerPlugin extends Plugin {
 
                     await this.convertDicomToImage(modifiedFile);
                     converted++;
+
+                    // Update progress
+                    const percentage = Math.round((converted / totalFiles) * 100);
+                    statusEl.setText(`Importing DICOM files... ${converted}/${totalFiles} (${percentage}%)`);
+                    progressFillEl.style.width = percentage + '%';
+
                 } catch (error) {
-                    console.error(`Error converting ${file.name}:`, error);
+                    console.error(`Error importing ${file.name}:`, error);
                     if (error instanceof Error) {
-                        new Notice(`Error converting ${file.name}: ${error.message}`);
+                        new Notice(`Error importing ${file.name}: ${error.message}`);
                     }
                 }
             }
 
-            new Notice(`Successfully converted ${converted} of ${folderFiles.length} DICOM files to ${destinationFolderPath}`);
+            // Remove progress element
+            progressEl.remove();
+            new Notice(`Successfully imported ${converted} of ${totalFiles} DICOM files to ${destinationFolderPath}`);
+
         } catch (error) {
             if (error instanceof Error) {
                 new Notice(`Error accessing folders: ${error.message}`);
