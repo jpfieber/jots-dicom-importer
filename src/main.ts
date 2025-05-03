@@ -145,11 +145,12 @@ export default class DICOMHandlerPlugin extends Plugin {
                 }
             }
 
-            // Add series description to filename if available
-            const seriesDesc = dicomData.string(DicomTags.SeriesDescription);
-            const newFileName = seriesDesc
-                ? `${file.basename}_${seriesDesc.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')}.${this.settings.imageFormat}`
-                : `${file.basename}.${this.settings.imageFormat}`;
+            // Get study date from DICOM data and format filename
+            const studyDate = dicomData.string(DicomTags.StudyDate) || '';
+            const formattedDate = studyDate ? studyDate.replace(/(\d{4})(\d{2})(\d{2})/, '$1$2$3') : '';
+            const newFileName = formattedDate
+                ? `${formattedDate} - IMG${file.basename}.${this.settings.imageFormat}`
+                : `IMG${file.basename}.${this.settings.imageFormat}`;
             const newPath = `${organizedPath}/${newFileName}`;
 
             // Convert base64 to binary
