@@ -2,15 +2,21 @@ import { App, PluginSettingTab, Setting, Notice, TFolder } from 'obsidian';
 import type DICOMHandlerPlugin from './main';
 import { FolderSuggest } from './ui/folder-suggest';
 import * as path from 'path';
+
+// Add Electron types
+interface OpenDialogReturnValue {
+    canceled: boolean;
+    filePaths: string[];
+}
+
 // @ts-ignore
 const electron = require('electron');
 
 export interface DICOMHandlerSettings {
-    imageFormat: 'png' | 'jpeg';
-    imageQuality: number;
+    imageFormat: 'png';  // Always PNG with OpenJPEG
     autoConvert: boolean;
-    lastFolderPath: string;
-    destinationFolderPath: string;
+    sourceFolderPath: string;    // External folder with DICOM files
+    destinationFolderPath: string; // Vault folder for converted images
     dicomIdentification: 'extension' | 'noExtension';
     dicomExtension: string;
     galleryImageWidth: number;
@@ -35,13 +41,16 @@ export interface DICOMHandlerSettings {
     includeSeriesNumber: boolean;
     includeSeriesDescription: boolean;
     includeSeriesDate: boolean;
+
+    // OpenJPEG Settings
+    opjPath: string;
+    tempDirectory: string;  // Directory for temporary processing files
 }
 
 export const DEFAULT_SETTINGS: DICOMHandlerSettings = {
     imageFormat: 'png',
-    imageQuality: 100,
     autoConvert: false,
-    lastFolderPath: '',
+    sourceFolderPath: '',
     destinationFolderPath: '',
     dicomIdentification: 'extension',
     dicomExtension: 'dcm',
@@ -67,12 +76,14 @@ export const DEFAULT_SETTINGS: DICOMHandlerSettings = {
     includeSeriesNumber: true,
     includeSeriesDescription: true,
     includeSeriesDate: false,
+
+    // OpenJPEG defaults
+    opjPath: '',
+    tempDirectory: ''
 };
 
 export class DICOMHandlerSettingsTab extends PluginSettingTab {
     plugin: DICOMHandlerPlugin;
-    private folderInputEl: HTMLInputElement | null = null;
-    private destFolderInputEl: HTMLInputElement | null = null;
 
     constructor(app: App, plugin: DICOMHandlerPlugin) {
         super(app, plugin);
@@ -84,38 +95,90 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
         containerEl.empty();
         containerEl.createEl('h2', { text: 'DICOM Handler Settings' });
 
+        // OpenJPEG Configuration
+        containerEl.createEl('h3', { text: 'OpenJPEG Configuration' });
+
         new Setting(containerEl)
-            .setName('Image Format')
-            .setDesc('Choose the output image format')
-            .addDropdown(dropdown => dropdown
-                .addOption('png', 'PNG')
-                .addOption('jpeg', 'JPEG')
-                .setValue(this.plugin.settings.imageFormat)
+            .setName('opj_decompress Path')
+            .setDesc('Path to opj_decompress executable from OpenJPEG')
+            .addText(text => text
+                .setPlaceholder('C:\\OpenJPEG\\bin\\opj_decompress.exe')
+                .setValue(this.plugin.settings.opjPath)
                 .onChange(async (value) => {
-                    this.plugin.settings.imageFormat = value as 'png' | 'jpeg';
+                    // Convert any forward slashes to backslashes for Windows
+                    const normalizedPath = value.replace(/\//g, '\\');
+                    this.plugin.settings.opjPath = normalizedPath;
                     await this.plugin.saveSettings();
                 }));
 
         new Setting(containerEl)
-            .setName('Image Quality')
-            .setDesc('Set the quality of converted images (1-100)')
-            .addSlider(slider => slider
-                .setLimits(1, 100, 1)
-                .setValue(this.plugin.settings.imageQuality)
+            .setName('Temporary Directory')
+            .setDesc('Directory for temporary processing files')
+            .addText(text => text
+                .setPlaceholder('C:\\temp\\dicom-work')
+                .setValue(this.plugin.settings.tempDirectory)
                 .onChange(async (value) => {
-                    this.plugin.settings.imageQuality = value;
+                    // Convert any forward slashes to backslashes for Windows
+                    const normalizedPath = value.replace(/\//g, '\\');
+                    this.plugin.settings.tempDirectory = normalizedPath;
                     await this.plugin.saveSettings();
                 }));
 
+        // Folder Settings
+        containerEl.createEl('h3', { text: 'Folder Settings' });
+
         new Setting(containerEl)
-            .setName('Auto Import')
-            .setDesc('Automatically import DICOM files when opened')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.autoConvert)
+            .setName('Source Folder')
+            .setDesc('Select the folder containing DICOM files (outside your vault)')
+            .addText(text => text
+                .setPlaceholder('C:\\DICOM\\input')
+                .setValue(this.plugin.settings.sourceFolderPath)
                 .onChange(async (value) => {
-                    this.plugin.settings.autoConvert = value;
+                    // Convert any forward slashes to backslashes for Windows
+                    const normalizedPath = value.replace(/\//g, '\\');
+                    this.plugin.settings.sourceFolderPath = normalizedPath;
                     await this.plugin.saveSettings();
-                }));
+                }))
+            .addButton(button => 
+                button
+                    .setButtonText('Browse...')
+                    .onClick(() => {
+                        // @ts-ignore
+                        const { dialog } = require('electron').remote;
+                        dialog.showOpenDialog({
+                            properties: ['openDirectory']
+                        }).then(async (result: OpenDialogReturnValue) => {
+                            if (!result.canceled && result.filePaths.length > 0) {
+                                const folderPath = result.filePaths[0];
+                                this.plugin.settings.sourceFolderPath = folderPath;
+                                await this.plugin.saveSettings();
+                                this.display(); // Refresh display
+                            }
+                        });
+                    }));
+
+        new Setting(containerEl)
+            .setName('Destination Folder')
+            .setDesc('Select where to save converted images (in your vault)')
+            .addText(text => {
+                text.setValue(this.plugin.settings.destinationFolderPath)
+                    .onChange(async (value) => {
+                        this.plugin.settings.destinationFolderPath = value;
+                        await this.plugin.saveSettings();
+                    });
+
+                // Initialize folder suggester for destination (vault folders only)
+                new FolderSuggest(
+                    this.app,
+                    text.inputEl,
+                    async (folder: TFolder) => {
+                        this.plugin.settings.destinationFolderPath = folder.path;
+                        await this.plugin.saveSettings();
+                    }
+                );
+
+                return text;
+            });
 
         // DICOM identification settings
         containerEl.createEl('h3', { text: 'DICOM File Identification' });
@@ -295,59 +358,13 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
         // Add folder conversion section
         containerEl.createEl('h3', { text: 'Bulk Import' });
 
-        const folderSetting = new Setting(containerEl)
-            .setName('Source Folder')
-            .setDesc('Select the folder containing DICOM files to import (in your vault)')
-            .addText(text => {
-                text.setValue(this.plugin.settings.lastFolderPath)
-                    .onChange(async (value) => {
-                        this.plugin.settings.lastFolderPath = value;
-                        await this.plugin.saveSettings();
-                    });
-
-                // Initialize folder suggester for source
-                new FolderSuggest(
-                    this.app,
-                    text.inputEl,
-                    async (folder: TFolder) => {
-                        this.plugin.settings.lastFolderPath = folder.path;
-                        await this.plugin.saveSettings();
-                    }
-                );
-
-                return text;
-            });
-
-        const destFolderSetting = new Setting(containerEl)
-            .setName('Destination Folder')
-            .setDesc('Select where to save the imported images (in your vault)')
-            .addText(text => {
-                text.setValue(this.plugin.settings.destinationFolderPath)
-                    .onChange(async (value) => {
-                        this.plugin.settings.destinationFolderPath = value;
-                        await this.plugin.saveSettings();
-                    });
-
-                // Initialize folder suggester for destination
-                new FolderSuggest(
-                    this.app,
-                    text.inputEl,
-                    async (folder: TFolder) => {
-                        this.plugin.settings.destinationFolderPath = folder.path;
-                        await this.plugin.saveSettings();
-                    }
-                );
-
-                return text;
-            });
-
         new Setting(containerEl)
             .setName('Import Files')
             .setDesc('Start importing all DICOM files from source to destination folder')
             .addButton(button => button
                 .setButtonText('Import All')
                 .onClick(async () => {
-                    if (!this.plugin.settings.lastFolderPath) {
+                    if (!this.plugin.settings.sourceFolderPath) {
                         new Notice('Please select a source folder first');
                         return;
                     }
@@ -356,7 +373,7 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                         return;
                     }
                     await this.plugin.convertFolder(
-                        this.plugin.settings.lastFolderPath,
+                        this.plugin.settings.sourceFolderPath,
                         this.plugin.settings.destinationFolderPath
                     );
                 }));

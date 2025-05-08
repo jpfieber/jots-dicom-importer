@@ -52,6 +52,10 @@ export const DicomTags = {
     RescaleSlope: 'x00281053',
     PixelData: 'x7fe00010',
 
+    // Required for raw pixel data handling
+    PlanarConfiguration: 'x00280006',
+    NumberOfFrames: 'x00280008',
+
     // Acquisition Information
     SpecificCharacterSet: 'x00080005',
     AcquisitionDate: 'x00080022',

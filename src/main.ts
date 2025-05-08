@@ -42,16 +42,16 @@ export default class DICOMHandlerPlugin extends Plugin {
             id: 'import-folder',
             name: 'Import All DICOM Files in Folder',
             callback: async () => {
-                if (!this.settings.lastFolderPath) {
-                    new Notice('Please select a source folder in settings first');
+                if (!this.settings.sourceFolderPath) {
+                    new Notice('Please configure the source folder in settings');
                     return;
                 }
                 if (!this.settings.destinationFolderPath) {
-                    new Notice('Please select a destination folder in settings first');
+                    new Notice('Please configure the destination folder in settings');
                     return;
                 }
                 await this.convertFolder(
-                    this.settings.lastFolderPath,
+                    this.settings.sourceFolderPath,
                     this.settings.destinationFolderPath
                 );
             }
@@ -314,8 +314,15 @@ export default class DICOMHandlerPlugin extends Plugin {
             }
 
             const folderName = folderPath.split('/').pop() || 'series';
-            const notePath = `${folderPath}/${studyDate ? studyDate + ' - ' : ''}${folderName}.md`;
+            const notePath = path.join(folderPath, `${studyDate ? studyDate + ' - ' : ''}${folderName}.md`).replace(/\\/g, '/');
 
+            // Create folder if it doesn't exist
+            const parentFolder = this.app.vault.getAbstractFileByPath(folderPath);
+            if (!parentFolder) {
+                await this.app.vault.createFolder(folderPath);
+            }
+
+            // Use vault.create instead of fs.writeFile
             await this.app.vault.create(notePath, content);
         } catch (error) {
             console.error('Error creating metadata note:', error);
@@ -325,43 +332,44 @@ export default class DICOMHandlerPlugin extends Plugin {
 
     async convertFolder(sourceFolderPath: string, destinationFolderPath: string) {
         try {
-            // Get source and destination folders from vault
-            const sourceFolder = this.app.vault.getAbstractFileByPath(sourceFolderPath);
-            if (!sourceFolder || !(sourceFolder instanceof TFolder)) {
-                throw new Error('Source folder not found in vault');
+            // Validate OpenJPEG settings
+            if (!this.settings.opjPath) {
+                throw new Error('Please configure the OpenJPEG path in settings');
             }
 
-            // Normalize the destination path and ensure each part of the path exists
-            const pathParts = destinationFolderPath.split('/').filter(part => part.length > 0);
-            let currentPath = '';
-            let destFolder: TFolder | null = null;
-
-            for (const part of pathParts) {
-                currentPath = currentPath ? `${currentPath}/${part}` : part;
-                const existing = this.app.vault.getAbstractFileByPath(currentPath);
-
-                if (!existing) {
-                    // Create this part of the path
-                    destFolder = await this.app.vault.createFolder(currentPath);
-                } else if (existing instanceof TFolder) {
-                    destFolder = existing;
-                } else {
-                    throw new Error(`Path exists but is not a folder: ${currentPath}`);
-                }
+            if (!this.settings.tempDirectory) {
+                throw new Error('Please configure the temporary directory in settings');
             }
 
-            if (!destFolder) {
-                throw new Error('Could not create or access destination folder');
+            // Validate that OpenJPEG exists
+            try {
+                await fs.access(this.settings.opjPath);
+            } catch {
+                throw new Error('OpenJPEG executable not found at specified path');
             }
 
-            const allFiles = this.app.vault.getAllLoadedFiles();
-            const folderFiles = allFiles.filter(file =>
-                file instanceof TFile &&
-                file.path.startsWith(sourceFolderPath + '/') &&
-                this.isDicomFile(file.name)
-            ) as TFile[];
+            // Create temporary directory if it doesn't exist
+            await fs.mkdir(this.settings.tempDirectory, { recursive: true });
+            
+            // Check if source folder exists (external folder)
+            try {
+                await fs.access(sourceFolderPath);
+            } catch {
+                throw new Error('Source folder not found or not accessible');
+            }
 
-            if (folderFiles.length === 0) {
+            // Get destination folder from vault
+            const destFolder = this.app.vault.getAbstractFileByPath(destinationFolderPath);
+            if (!destFolder || !(destFolder instanceof TFolder)) {
+                // Create destination folder if it doesn't exist
+                await this.app.vault.createFolder(destinationFolderPath);
+            }
+
+            // Read all files from external source directory
+            const files = await fs.readdir(sourceFolderPath);
+            const dicomFiles = files.filter(file => this.isDicomFile(file));
+
+            if (dicomFiles.length === 0) {
                 const methodDesc = this.settings.dicomIdentification === 'extension'
                     ? `files with .${this.settings.dicomExtension} extension`
                     : 'files without extension';
@@ -370,7 +378,7 @@ export default class DICOMHandlerPlugin extends Plugin {
             }
 
             let converted = 0;
-            const totalFiles = folderFiles.length;
+            const totalFiles = dicomFiles.length;
 
             // Track series by their SeriesInstanceUID
             const seriesMap = new Map<string, {
@@ -378,35 +386,29 @@ export default class DICOMHandlerPlugin extends Plugin {
                 folderPath: string
             }>();
 
-            // Create progress UI
-            const progressEl = document.createElement('div');
-            progressEl.addClass('dicom-progress');
+            // Show initial notice
+            new Notice(`Starting import of ${totalFiles} DICOM files...`);
 
-            const statusEl = document.createElement('div');
-            statusEl.setText(`Importing DICOM files... 0/${totalFiles}`);
-            progressEl.appendChild(statusEl);
-
-            const progressBarEl = document.createElement('div');
-            progressBarEl.addClass('dicom-progress-bar');
-            const progressFillEl = document.createElement('div');
-            progressFillEl.addClass('dicom-progress-bar-fill');
-            progressFillEl.style.width = '0%';
-            progressBarEl.appendChild(progressFillEl);
-            progressEl.appendChild(progressBarEl);
-
-            document.body.appendChild(progressEl);
-
-            for (const file of folderFiles) {
+            for (const fileName of dicomFiles) {
                 try {
-                    const modifiedFile = {
-                        ...file,
-                        parent: destFolder
+                    // Read the file from external folder
+                    const filePath = path.join(sourceFolderPath, fileName);
+                    const fileBuffer = await fs.readFile(filePath);
+                    
+                    // Create a temporary TFile-like object
+                    const tempFile = {
+                        path: fileName,
+                        name: fileName,
+                        basename: path.parse(fileName).name,
+                        extension: path.parse(fileName).ext.slice(1),
+                        vault: this.app.vault,
+                        parent: this.app.vault.getAbstractFileByPath(destinationFolderPath) as TFolder
                     } as TFile;
 
-                    // Read DICOM data
-                    const arrayBuffer = await this.app.vault.readBinary(file);
+                    // Parse DICOM data
+                    const arrayBuffer = new Uint8Array(fileBuffer).buffer;
                     const dicomData = this.dicomService.parseDicomData(arrayBuffer);
-                    const organizedPath = this.getOrganizedFolderPath(destFolder.path, dicomData);
+                    const organizedPath = this.getOrganizedFolderPath(destinationFolderPath, dicomData);
 
                     // Store DICOM data for each unique series
                     const seriesInstanceUID = dicomData.string(DicomTags.SeriesInstanceUID);
@@ -417,19 +419,29 @@ export default class DICOMHandlerPlugin extends Plugin {
                         });
                     }
 
+                    // Create a new temporary file in the vault's memory
+                    const vaultFile = await this.app.vault.createBinary(
+                        path.join(destinationFolderPath, fileName),
+                        fileBuffer
+                    );
+
                     // Convert the image
-                    await this.convertDicomToImage(modifiedFile, destFolder);
+                    await this.convertDicomToImage(vaultFile as TFile);
+                    
+                    // Clean up temporary vault file
+                    await this.app.vault.delete(vaultFile);
+                    
                     converted++;
 
-                    // Update progress
-                    const percentage = Math.round((converted / totalFiles) * 100);
-                    statusEl.setText(`Importing DICOM files... ${converted}/${totalFiles} (${percentage}%)`);
-                    progressFillEl.style.width = percentage + '%';
+                    // Show progress every 10% or at least every 10 files
+                    if (converted % Math.max(10, Math.round(totalFiles / 10)) === 0) {
+                        new Notice(`Importing DICOM files... ${converted}/${totalFiles}`);
+                    }
 
                 } catch (error) {
-                    console.error(`Error importing ${file.name}:`, error);
+                    console.error(`Error importing ${fileName}:`, error);
                     if (error instanceof Error) {
-                        new Notice(`Error importing ${file.name}: ${error.message}`);
+                        new Notice(`Error importing ${fileName}: ${error.message}`);
                     }
                 }
             }
@@ -439,8 +451,6 @@ export default class DICOMHandlerPlugin extends Plugin {
                 await this.createMetadataNote(dicomData, folderPath);
             }
 
-            // Remove progress element
-            progressEl.remove();
             new Notice(`Successfully imported ${converted} of ${totalFiles} DICOM files to ${destinationFolderPath}`);
 
         } catch (error) {
