@@ -10,7 +10,7 @@ export class DICOMService {
     constructor(
         private app: App,
         private settings: DICOMHandlerSettings
-    ) {}
+    ) { }
 
     private extractPixelData(dicomData: dicomParser.DataSet): { data: Buffer, needsDecompression: boolean } {
         const pixelDataElement = dicomData.elements[DicomTags.PixelData];
@@ -25,7 +25,7 @@ export class DICOMService {
         if (transferSyntax === '1.2.840.10008.1.2.1' || // Explicit VR Little Endian
             transferSyntax === '1.2.840.10008.1.2' ||    // Implicit VR Little Endian
             transferSyntax === '1.2.840.10008.1.2.2') {  // Explicit VR Big Endian
-            
+
             return {
                 data: Buffer.from(dicomData.byteArray.buffer, pixelDataElement.dataOffset, pixelDataElement.length),
                 needsDecompression: false
@@ -35,14 +35,14 @@ export class DICOMService {
         // Handle JPEG2000 compressed data
         if (transferSyntax === '1.2.840.10008.1.2.4.90' || // JPEG 2000 Lossless
             transferSyntax === '1.2.840.10008.1.2.4.91') { // JPEG 2000 Lossy
-            
+
             const byteArray = new Uint8Array(dicomData.byteArray.buffer);
             let position = pixelDataElement.dataOffset;
 
             // Skip Basic Offset Table if present
             if (byteArray[position] === 0xFE && byteArray[position + 1] === 0xFF &&
                 byteArray[position + 2] === 0x00 && byteArray[position + 3] === 0xE0) {
-                const botLength = 
+                const botLength =
                     byteArray[position + 4] |
                     (byteArray[position + 5] << 8) |
                     (byteArray[position + 6] << 16) |
@@ -54,26 +54,26 @@ export class DICOMService {
             if (position < byteArray.length - 8 &&
                 byteArray[position] === 0xFE && byteArray[position + 1] === 0xFF &&
                 byteArray[position + 2] === 0x00 && byteArray[position + 3] === 0xE0) {
-                
-                const itemLength = 
+
+                const itemLength =
                     byteArray[position + 4] |
                     (byteArray[position + 5] << 8) |
                     (byteArray[position + 6] << 16) |
                     (byteArray[position + 7] << 24);
-                
+
                 position += 8;
-                
+
                 const j2kData = Buffer.from(byteArray.buffer, byteArray.byteOffset + position, itemLength);
-                
+
                 return {
                     data: j2kData,
                     needsDecompression: true
                 };
             }
-            
+
             throw new Error('Could not find JPEG2000 stream after Basic Offset Table');
         }
-        
+
         throw new Error(`Unsupported transfer syntax: ${transferSyntax}`);
     }
 
@@ -102,10 +102,10 @@ export class DICOMService {
                 // For JPEG2000, use OpenJPEG
                 const j2kPath = path.join(this.settings.tempDirectory, `${uniqueId}.j2k`);
                 const outputPath = path.join(this.settings.tempDirectory, `${uniqueId}.png`);
-                
+
                 await fs.writeFile(j2kPath, data);
                 await this.runConverter(j2kPath, outputPath);
-                
+
                 // Read the converted image
                 const convertedImage = await fs.readFile(outputPath);
                 const base64Image = convertedImage.toString('base64');
@@ -115,15 +115,15 @@ export class DICOMService {
 
                 // Show success notification
                 new Notice(`Successfully converted ${file.name}`);
-                
+
                 return `data:image/png;base64,${base64Image}`;
             } else {
                 // For raw pixel data, convert using our PNG encoder
                 const result = await this.convertRawToImage(data, dicomData);
-                
+
                 // Show success notification
                 new Notice(`Successfully converted ${file.name}`);
-                
+
                 return result;
             }
         } catch (error) {
@@ -135,20 +135,20 @@ export class DICOMService {
     private async runConverter(inputPath: string, outputPath: string): Promise<void> {
         return new Promise((resolve, reject) => {
             const { exec } = require('child_process');
-            
+
             const command = `"${this.settings.opjPath}" -i "${inputPath}" -o "${outputPath}"`;
-            
+
             exec(command, { windowsHide: true }, (error: any, stdout: string, stderr: string) => {
                 if (error) {
                     reject(new Error(`OpenJPEG conversion failed: ${error.message}`));
                     return;
                 }
-                
+
                 // Only log stderr if it contains actual error content
                 if (stderr && stderr.trim() !== '') {
                     console.error('OpenJPEG stderr:', stderr);
                 }
-                
+
                 resolve();
             });
         });
@@ -189,7 +189,7 @@ export class DICOMService {
         // Convert 16-bit to 8-bit using window/level
         const lowValue = windowCenter - (windowWidth / 2);
         const highValue = windowCenter + (windowWidth / 2);
-        
+
         // Create PNG header (IHDR chunk)
         const pngSignature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
         const ihdrChunk = this.createPNGChunk('IHDR', Buffer.from([
@@ -205,17 +205,17 @@ export class DICOMService {
         // Create image data
         const scanlineLength = columns + 1; // +1 for filter type byte
         const imageData = Buffer.alloc(rows * scanlineLength);
-        
+
         // Fill image data with normalized pixel values
         for (let y = 0; y < rows; y++) {
             imageData[y * scanlineLength] = 0; // Filter type 0 (None)
             for (let x = 0; x < columns; x++) {
                 const pixelValue = pixels[y * columns + x] * rescaleSlope + rescaleIntercept;
-                
+
                 // Apply window/level
                 let normalized = (pixelValue - lowValue) / (highValue - lowValue);
                 normalized = Math.max(0, Math.min(1, normalized));
-                
+
                 // Convert to 8-bit
                 const intensity = Math.round(normalized * 255);
                 imageData[y * scanlineLength + x + 1] = intensity;

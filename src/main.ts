@@ -350,7 +350,7 @@ export default class DICOMHandlerPlugin extends Plugin {
 
             // Create temporary directory if it doesn't exist
             await fs.mkdir(this.settings.tempDirectory, { recursive: true });
-            
+
             // Check if source folder exists (external folder)
             try {
                 await fs.access(sourceFolderPath);
@@ -394,7 +394,7 @@ export default class DICOMHandlerPlugin extends Plugin {
                     // Read the file from external folder
                     const filePath = path.join(sourceFolderPath, fileName);
                     const fileBuffer = await fs.readFile(filePath);
-                    
+
                     // Create a temporary TFile-like object
                     const tempFile = {
                         path: fileName,
@@ -427,10 +427,10 @@ export default class DICOMHandlerPlugin extends Plugin {
 
                     // Convert the image
                     await this.convertDicomToImage(vaultFile as TFile);
-                    
+
                     // Clean up temporary vault file
                     await this.app.vault.delete(vaultFile);
-                    
+
                     converted++;
 
                     // Show progress every 10% or at least every 10 files

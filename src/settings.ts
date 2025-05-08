@@ -139,7 +139,7 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                     this.plugin.settings.sourceFolderPath = normalizedPath;
                     await this.plugin.saveSettings();
                 }))
-            .addButton(button => 
+            .addButton(button =>
                 button
                     .setButtonText('Browse...')
                     .onClick(() => {
