@@ -44,7 +44,9 @@ export interface DICOMHandlerSettings {
 
     // OpenJPEG Settings
     opjPath: string;
-    tempDirectory: string;  // Directory for temporary processing files
+
+    // Archive setting
+    archiveDicomFiles: boolean;    // Whether to archive original DICOM files
 }
 
 export const DEFAULT_SETTINGS: DICOMHandlerSettings = {
@@ -79,7 +81,9 @@ export const DEFAULT_SETTINGS: DICOMHandlerSettings = {
 
     // OpenJPEG defaults
     opjPath: '',
-    tempDirectory: ''
+
+    // Archive setting default
+    archiveDicomFiles: false
 };
 
 export class DICOMHandlerSettingsTab extends PluginSettingTab {
@@ -108,19 +112,6 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                     // Convert any forward slashes to backslashes for Windows
                     const normalizedPath = value.replace(/\//g, '\\');
                     this.plugin.settings.opjPath = normalizedPath;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Temporary Directory')
-            .setDesc('Directory for temporary processing files')
-            .addText(text => text
-                .setPlaceholder('C:\\temp\\dicom-work')
-                .setValue(this.plugin.settings.tempDirectory)
-                .onChange(async (value) => {
-                    // Convert any forward slashes to backslashes for Windows
-                    const normalizedPath = value.replace(/\//g, '\\');
-                    this.plugin.settings.tempDirectory = normalizedPath;
                     await this.plugin.saveSettings();
                 }));
 
@@ -376,6 +367,18 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                         this.plugin.settings.sourceFolderPath,
                         this.plugin.settings.destinationFolderPath
                     );
+                }));
+
+        containerEl.createEl('h3', { text: 'File Handling' });
+
+        new Setting(containerEl)
+            .setName('Save Original DICOM Files')
+            .setDesc('Save original DICOM files in a DICOM folder within each series')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.archiveDicomFiles)
+                .onChange(async (value) => {
+                    this.plugin.settings.archiveDicomFiles = value;
+                    await this.plugin.saveSettings();
                 }));
 
         containerEl.createEl('h3', { text: 'Display Settings' });

@@ -83,47 +83,56 @@ export class DICOMService {
                 throw new Error('OpenJPEG path is not configured');
             }
 
-            if (!this.settings.tempDirectory) {
-                throw new Error('Temporary directory is not configured');
-            }
-
             // Read DICOM data for metadata
             const arrayBuffer = await this.loadDICOMFile(file);
             const dicomData = this.parseDicomData(arrayBuffer);
 
-            // Create temporary directory if it doesn't exist
-            await fs.mkdir(this.settings.tempDirectory, { recursive: true });
-
             // Extract pixel data
-            const uniqueId = Date.now().toString();
             const { data, needsDecompression } = this.extractPixelData(dicomData);
 
             if (needsDecompression) {
-                // For JPEG2000, use OpenJPEG
-                const j2kPath = path.join(this.settings.tempDirectory, `${uniqueId}.j2k`);
-                const outputPath = path.join(this.settings.tempDirectory, `${uniqueId}.png`);
+                // Create temporary .j2k file in the file's parent folder
+                const j2kPath = `${file.parent?.path}/${Date.now()}.j2k`.replace(/\\/g, '/');
+                await this.app.vault.createBinary(j2kPath, data);
 
-                await fs.writeFile(j2kPath, data);
-                await this.runConverter(j2kPath, outputPath);
+                try {
+                    // Get absolute paths for OpenJPEG
+                    const vaultPath = (this.app.vault.adapter as any).basePath;
+                    const absoluteInputPath = path.join(vaultPath, j2kPath);
+                    const outputPath = `${file.parent?.path}/${file.basename}.png`.replace(/\\/g, '/');
+                    const absoluteOutputPath = path.join(vaultPath, outputPath);
 
-                // Read the converted image
-                const convertedImage = await fs.readFile(outputPath);
-                const base64Image = convertedImage.toString('base64');
+                    // Run OpenJPEG with absolute paths
+                    await this.runConverter(absoluteInputPath, absoluteOutputPath);
 
-                // Clean up temporary files
-                await this.cleanup(j2kPath, outputPath);
+                    // Read the converted image
+                    const finalImageFile = this.app.vault.getAbstractFileByPath(outputPath);
+                    if (!finalImageFile || !(finalImageFile instanceof TFile)) {
+                        throw new Error('Failed to read converted image');
+                    }
 
-                // Show success notification
-                new Notice(`Successfully converted ${file.name}`);
+                    const convertedImage = await this.app.vault.readBinary(finalImageFile);
+                    const base64Image = Buffer.from(convertedImage).toString('base64');
 
-                return `data:image/png;base64,${base64Image}`;
+                    // Clean up temporary files
+                    const tempFile = this.app.vault.getAbstractFileByPath(j2kPath);
+                    if (tempFile) {
+                        await this.app.vault.delete(tempFile);
+                    }
+                    await this.app.vault.delete(finalImageFile);
+
+                    return `data:image/png;base64,${base64Image}`;
+                } catch (error) {
+                    // Clean up temporary file if conversion fails
+                    const tempFile = this.app.vault.getAbstractFileByPath(j2kPath);
+                    if (tempFile) {
+                        await this.app.vault.delete(tempFile);
+                    }
+                    throw error;
+                }
             } else {
                 // For raw pixel data, convert using our PNG encoder
                 const result = await this.convertRawToImage(data, dicomData);
-
-                // Show success notification
-                new Notice(`Successfully converted ${file.name}`);
-
                 return result;
             }
         } catch (error) {
@@ -136,11 +145,13 @@ export class DICOMService {
         return new Promise((resolve, reject) => {
             const { exec } = require('child_process');
 
+            // Ensure consistent path handling
             const command = `"${this.settings.opjPath}" -i "${inputPath}" -o "${outputPath}"`;
+            console.log('Running OpenJPEG command:', command);
 
             exec(command, { windowsHide: true }, (error: any, stdout: string, stderr: string) => {
                 if (error) {
-                    reject(new Error(`OpenJPEG conversion failed: ${error.message}`));
+                    reject(new Error(`OpenJPEG conversion failed: ${error.message}\n${stderr}`));
                     return;
                 }
 
@@ -290,7 +301,10 @@ export class DICOMService {
     private async cleanup(...paths: string[]): Promise<void> {
         for (const filePath of paths) {
             try {
-                await fs.unlink(filePath);
+                const file = this.app.vault.getAbstractFileByPath(filePath);
+                if (file) {
+                    await this.app.vault.delete(file);
+                }
             } catch (error) {
                 console.error(`Failed to clean up file ${filePath}:`, error);
             }
