@@ -4,6 +4,7 @@ import { DICOMService } from './services/dicom-service';
 import { FileService } from './services/file-service';
 import { ViewerService } from './services/viewer-service';
 import { DicomTags } from './models/dicom-tags';
+import { DicomModalities } from './models/dicom-modalities';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import dicomParser from 'dicom-parser';
@@ -194,6 +195,33 @@ export default class DICOMHandlerPlugin extends Plugin {
         }
     }
 
+    // Helper function to check if a string looks like a name
+    private isLikelyName(str: string): boolean {
+        // Remove any leading/trailing whitespace
+        str = str.trim();
+
+        // Check if string contains at least one letter
+        if (!/[a-zA-Z]/.test(str)) {
+            return false;
+        }
+
+        // Check if string is not just numbers with separators
+        if (/^[\d\s.,/-]+$/.test(str)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private formatPatientName(name: string): string {
+        // Check if the name contains the DICOM separator '^'
+        if (name.includes('^')) {
+            const [lastName, firstName] = name.split('^');
+            return `${firstName} ${lastName}`;
+        }
+        return name;
+    }
+
     private async createMetadataNote(dataset: dicomParser.DataSet, folderPath: string) {
         try {
             const elements = dataset.elements;
@@ -287,10 +315,28 @@ export default class DICOMHandlerPlugin extends Plugin {
             const titleDate = studyDate ? `${studyDate} - ` : '';
 
             content += `# ${titleDate}${seriesDesc}\n\n`;
-            content += `This note contains metadata for a DICOM series${studyDate ? ` acquired on ${studyDate}` : ''}.\n\n`;
 
-            // Add horizontal rule before gallery
-            content += `---\n\n`;
+            // Add DICOM metadata as a list after the description
+            content += `## DICOM Information\n\n`;
+
+            const patientName = dataset.string(DicomTags.PatientName);
+            if (patientName) content += `**Patient Name:** ${this.formatPatientName(patientName)}\n`;
+            if (dataset.string(DicomTags.InstitutionName)) content += `**Imaging Site:** ${dataset.string(DicomTags.InstitutionName)}\n`;
+            const modality = dataset.string(DicomTags.Modality);
+            if (modality) {
+                const modalityInfo = DicomModalities[modality];
+                const modalityText = modalityInfo
+                    ? `${modalityInfo.description}${modalityInfo.isRetired ? ' (Retired)' : ''}`
+                    : modality;
+                content += `**Imaging Type:** ${modalityText}\n`;
+            }
+            if (dataset.string(DicomTags.StudyDescription)) content += `**Study Type:** ${dataset.string(DicomTags.StudyDescription)}\n`;
+            if (dataset.string(DicomTags.SeriesDescription)) content += `**Series Type:** ${dataset.string(DicomTags.SeriesDescription)}\n`;
+            const studyPhysician = dataset.string(DicomTags.StudyPhysician);
+            if (studyPhysician && this.isLikelyName(studyPhysician)) {
+                content += `**Referring Physician:** ${studyPhysician}\n`;
+            }
+            content += '\n';
 
             // Get all image files in the folder to create gallery
             const folder = this.app.vault.getAbstractFileByPath(folderPath);
@@ -314,7 +360,12 @@ export default class DICOMHandlerPlugin extends Plugin {
             }
 
             const folderName = folderPath.split('/').pop() || 'series';
-            const notePath = path.join(folderPath, `${studyDate ? studyDate + ' - ' : ''}${folderName}.md`).replace(/\\/g, '/');
+            // Always start with the date if available, then use the folder name without any date prefix
+            const sanitizedFolderName = folderName.replace(/^\d{8}\s*-\s*/, ''); // Remove any date prefix from folder name
+            const notePath = path.join(
+                folderPath,
+                `${studyDate ? studyDate + ' - ' : ''}${sanitizedFolderName}.md`
+            ).replace(/\\/g, '/');
 
             // Create folder if it doesn't exist
             const parentFolder = this.app.vault.getAbstractFileByPath(folderPath);
