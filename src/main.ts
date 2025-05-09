@@ -425,12 +425,8 @@ export default class DICOMHandlerPlugin extends Plugin {
                 await this.app.vault.createFolder(destinationFolderPath);
             }
 
-            // Read all entries from external source directory
-            const entries = await fs.readdir(sourceFolderPath, { withFileTypes: true });
-            // Filter to only include files (not directories) that match our DICOM criteria
-            const dicomFiles = entries
-                .filter(entry => entry.isFile() && this.isDicomFile(entry.name))
-                .map(entry => entry.name);
+            // Recursively find all DICOM files in source folder and subfolders
+            const dicomFiles = await this.findDicomFilesRecursively(sourceFolderPath);
 
             if (dicomFiles.length === 0) {
                 const methodDesc = this.settings.dicomIdentification === 'extension'
@@ -456,11 +452,11 @@ export default class DICOMHandlerPlugin extends Plugin {
             const tempFiles: string[] = [];
 
             try {
-                for (const fileName of dicomFiles) {
+                for (const filePath of dicomFiles) {
                     try {
                         // Read the file from external folder
-                        const filePath = path.join(sourceFolderPath, fileName);
                         const fileBuffer = await fs.readFile(filePath);
+                        const fileName = path.basename(filePath);
 
                         // Parse DICOM data to get organized path
                         const arrayBuffer = new Uint8Array(fileBuffer).buffer;
@@ -535,9 +531,9 @@ export default class DICOMHandlerPlugin extends Plugin {
                             await this.app.vault.delete(tempFile);
                         }
                     } catch (error) {
-                        console.error(`Error importing ${fileName}:`, error);
+                        console.error(`Error importing ${path.basename(filePath)}:`, error);
                         if (error instanceof Error) {
-                            new Notice(`Error importing ${fileName}: ${error.message}`);
+                            new Notice(`Error importing ${path.basename(filePath)}: ${error.message}`);
                         }
                     }
                 }
@@ -575,6 +571,25 @@ export default class DICOMHandlerPlugin extends Plugin {
             // Check if file has no extension
             return path.extname(filename) === '';
         }
+    }
+
+    private async findDicomFilesRecursively(folderPath: string): Promise<string[]> {
+        const dicomFiles: string[] = [];
+        const entries = await fs.readdir(folderPath, { withFileTypes: true });
+
+        for (const entry of entries) {
+            const fullPath = path.join(folderPath, entry.name);
+
+            if (entry.isDirectory()) {
+                // Recursively search subdirectories
+                const subDirFiles = await this.findDicomFilesRecursively(fullPath);
+                dicomFiles.push(...subDirFiles);
+            } else if (entry.isFile() && this.isDicomFile(entry.name)) {
+                dicomFiles.push(fullPath);
+            }
+        }
+
+        return dicomFiles;
     }
 
     async loadSettings() {
