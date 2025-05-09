@@ -148,16 +148,21 @@ export default class DICOMHandlerPlugin extends Plugin {
             }
 
             // Get organized folder path and normalize it
-            const basePath = destFolder.path;
+            const basePath = destFolder.path.replace(/\\/g, '/');
             const organizedPath = this.getOrganizedFolderPath(basePath, dicomData);
 
-            // Create all necessary folders
-            const folders = organizedPath.split('/').filter(part => part.length > 0);
+            // Create Images subfolder path with forward slashes
+            const imagesPath = `${organizedPath}/Images`;
+
+            // Create all necessary folders including Images subfolder
+            const folders = imagesPath.split('/').filter(part => part.length > 0);
             let currentPath = '';
             for (const folder of folders) {
                 currentPath = currentPath ? `${currentPath}/${folder}` : folder;
+                console.log('Creating/checking folder:', currentPath);
                 const existing = this.app.vault.getAbstractFileByPath(currentPath);
                 if (!existing) {
+                    console.log('Creating new folder:', currentPath);
                     await this.app.vault.createFolder(currentPath);
                 }
             }
@@ -178,7 +183,8 @@ export default class DICOMHandlerPlugin extends Plugin {
                 ? `${formattedDate}-S${paddedSeriesNum}-${originalName}.${this.settings.imageFormat}`
                 : `S${paddedSeriesNum}-${originalName}.${this.settings.imageFormat}`;
 
-            const newPath = `${organizedPath}/${newFileName}`;
+            // Use Images subfolder for the new path
+            const newPath = `${imagesPath}/${newFileName}`;
 
             // Convert base64 to binary
             const base64Data = imageData.replace(new RegExp(`^data:image/${this.settings.imageFormat};base64,`), '');
@@ -338,25 +344,35 @@ export default class DICOMHandlerPlugin extends Plugin {
             }
             content += '\n';
 
-            // Get all image files in the folder to create gallery
-            const folder = this.app.vault.getAbstractFileByPath(folderPath);
-            if (folder instanceof TFolder) {
-                const imageFiles = folder.children
+            // Get all image files in the Images subfolder to create gallery
+            const imagesPath = `${folderPath}/Images`.replace(/\\/g, '/');
+            console.log('Looking for images in:', imagesPath);
+            const imagesFolder = this.app.vault.getAbstractFileByPath(imagesPath);
+            console.log('Images folder exists?', imagesFolder ? 'yes' : 'no');
+            if (imagesFolder instanceof TFolder) {
+                const imageFiles = imagesFolder.children
                     .filter(file => file instanceof TFile &&
                         (file.extension === 'png' || file.extension === 'jpg' || file.extension === 'jpeg'))
                     .sort((a, b) => a.name.localeCompare(b.name));
+
+                console.log('Found images:', imageFiles.map(f => f.name));
 
                 if (imageFiles.length > 0) {
                     content += `## Gallery\n\n`;
                     const imageWidth = this.settings.galleryImageWidth;
                     imageFiles.forEach((file, index) => {
+                        // Use simple relative path
                         content += `![[${file.name}|${imageWidth}]]`;
                         if (index < imageFiles.length - 1) {
                             content += ' ';
                         }
                     });
                     content += '\n\n';
+                } else {
+                    console.log('No images found in the Images folder');
                 }
+            } else {
+                console.log('Images folder not found at:', imagesPath);
             }
 
             const folderName = folderPath.split('/').pop() || 'series';
@@ -368,11 +384,13 @@ export default class DICOMHandlerPlugin extends Plugin {
             ).replace(/\\/g, '/');
 
             // Create folder if it doesn't exist
-            const parentFolder = this.app.vault.getAbstractFileByPath(folderPath);
+            const parentFolder = this.app.vault.getAbstractFileByPath(folderPath.replace(/\\/g, '/'));
             if (!parentFolder) {
-                await this.app.vault.createFolder(folderPath);
+                console.log('Creating parent folder:', folderPath);
+                await this.app.vault.createFolder(folderPath.replace(/\\/g, '/'));
             }
 
+            console.log('Creating note at:', notePath);
             // Use vault.create instead of fs.writeFile
             await this.app.vault.create(notePath, content);
         } catch (error) {
@@ -416,9 +434,12 @@ export default class DICOMHandlerPlugin extends Plugin {
                 await this.app.vault.createFolder(destinationFolderPath);
             }
 
-            // Read all files from external source directory
-            const files = await fs.readdir(sourceFolderPath);
-            const dicomFiles = files.filter(file => this.isDicomFile(file));
+            // Read all entries from external source directory
+            const entries = await fs.readdir(sourceFolderPath, { withFileTypes: true });
+            // Filter to only include files (not directories) that match our DICOM criteria
+            const dicomFiles = entries
+                .filter(entry => entry.isFile() && this.isDicomFile(entry.name))
+                .map(entry => entry.name);
 
             if (dicomFiles.length === 0) {
                 const methodDesc = this.settings.dicomIdentification === 'extension'
@@ -459,7 +480,7 @@ export default class DICOMHandlerPlugin extends Plugin {
                     // Parse DICOM data
                     const arrayBuffer = new Uint8Array(fileBuffer).buffer;
                     const dicomData = this.dicomService.parseDicomData(arrayBuffer);
-                    const organizedPath = this.getOrganizedFolderPath(destinationFolderPath, dicomData);
+                    const organizedPath = this.getOrganizedFolderPath(destinationFolderPath, dicomData).replace(/\\/g, '/');
 
                     // Store DICOM data for each unique series
                     const seriesInstanceUID = dicomData.string(DicomTags.SeriesInstanceUID);
@@ -498,7 +519,19 @@ export default class DICOMHandlerPlugin extends Plugin {
             }
 
             // Create metadata notes for each series after all files are converted
+            // Add a small delay to ensure all file operations are complete
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
             for (const { dicomData, folderPath } of seriesMap.values()) {
+                // Verify Images folder exists before creating note
+                const imagesPath = `${folderPath}/Images`.replace(/\\/g, '/');
+                const imagesFolder = this.app.vault.getAbstractFileByPath(imagesPath);
+
+                if (!imagesFolder) {
+                    console.log('Creating Images folder:', imagesPath);
+                    await this.app.vault.createFolder(imagesPath);
+                }
+
                 await this.createMetadataNote(dicomData, folderPath);
             }
 
