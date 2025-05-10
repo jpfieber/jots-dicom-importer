@@ -117,16 +117,15 @@ export default class DICOMHandlerPlugin extends Plugin {
         // Study folder - always included with mandatory components
         const studyParts: string[] = [];
 
-        const modality = dataset.string(DicomTags.Modality);
         const studyDesc = dataset.string(DicomTags.StudyDescription);
         const patientName = dataset.string(DicomTags.PatientName);
 
         // Always put date first if available
         if (studyDate) studyParts.push(studyDate);
 
-        // Join date and 'Study' with spaced hyphen, then join rest with regular hyphens
+        // Join date and 'Study' with spaced hyphen, then add description
         const restOfParts: string[] = ['Study'];
-        if (modality) restOfParts.push(modality);
+        // Removed modality from here since it's typically part of the study description
         if (studyDesc) restOfParts.push(studyDesc);
 
         let studyFolderName = studyDate
@@ -179,7 +178,6 @@ export default class DICOMHandlerPlugin extends Plugin {
             const folder = this.app.vault.getAbstractFileByPath(currentPath);
             if (!folder) {
                 await this.app.vault.createFolder(currentPath);
-                console.log(`Created folder: ${currentPath}`);
             }
         }
     }
@@ -193,7 +191,6 @@ export default class DICOMHandlerPlugin extends Plugin {
             currentPath = currentPath ? `${currentPath}/${part}` : part;
             const folder = this.app.vault.getAbstractFileByPath(currentPath);
             if (!folder) {
-                console.log(`Creating folder: ${currentPath}`);
                 await this.app.vault.createFolder(currentPath);
             }
         }
@@ -201,17 +198,14 @@ export default class DICOMHandlerPlugin extends Plugin {
 
     private async convertDicomToImage(file: TFile, destFolder?: TFolder) {
         try {
-            console.log(`Starting DICOM conversion for file: ${file.path}`);
             let arrayBuffer;
             // Handle file reading more carefully
             if (file.path.startsWith('C:') || file.path.startsWith('/')) {
                 // For absolute paths, read directly using fs
                 arrayBuffer = await fs.readFile(file.path);
-                console.log('Read DICOM file from absolute path');
             } else {
                 // For vault-relative paths, use vault API
                 arrayBuffer = await this.app.vault.readBinary(file);
-                console.log('Read DICOM file from vault');
             }
 
             const dicomData = this.dicomService.parseDicomData(arrayBuffer);
@@ -238,7 +232,6 @@ export default class DICOMHandlerPlugin extends Plugin {
                     await this.ensureFolder(dicomPath);
                     const dicomFilePath = path.join(dicomPath, file.name).replace(/\\/g, '/');
                     await this.app.vault.createBinary(dicomFilePath, Buffer.from(arrayBuffer));
-                    console.log('Archived original DICOM file');
                 }
                 return;
             }
@@ -247,7 +240,6 @@ export default class DICOMHandlerPlugin extends Plugin {
             const imageData = await this.dicomService.convertToImage(file);
 
             const imagesPath = path.join(basePath, 'Images').replace(/\\/g, '/');
-            console.log(`Target images folder: ${imagesPath}`);
 
             // Ensure the Images folder and all parent folders exist
             await this.ensureFolder(imagesPath);
@@ -255,16 +247,13 @@ export default class DICOMHandlerPlugin extends Plugin {
             // Use simple PNG filename - original name + .png
             const newFileName = `${file.basename}.png`;
             const newPath = path.join(imagesPath, newFileName).replace(/\\/g, '/');
-            console.log(`Saving PNG to: ${newPath}`);
 
             // Convert base64 to binary
             const base64Data = imageData.replace(new RegExp(`^data:image/${this.settings.imageFormat};base64,`), '');
             const binaryData = Buffer.from(base64Data, 'base64');
-            console.log(`Converting base64 data (length: ${base64Data.length}) to binary`);
 
             // Save the PNG image
             await this.app.vault.createBinary(newPath, binaryData);
-            console.log('Successfully saved PNG file');
 
             // Archive original DICOM file if enabled
             if (this.settings.archiveDicomFiles) {
@@ -274,7 +263,6 @@ export default class DICOMHandlerPlugin extends Plugin {
                 // Copy the original DICOM file with original name
                 const dicomFilePath = path.join(dicomPath, file.name).replace(/\\/g, '/');
                 await this.app.vault.createBinary(dicomFilePath, Buffer.from(arrayBuffer));
-                console.log('Archived original DICOM file');
             }
 
         } catch (error) {
@@ -607,7 +595,6 @@ export default class DICOMHandlerPlugin extends Plugin {
                     if (this.settings.archiveDicomFiles) {
                         const dicomPath = `${organizedPath}/DICOM`;
                         await this.ensureFolderPath(dicomPath);
-                        // Save DICOM file directly to its final location
                         await this.app.vault.createBinary(
                             `${dicomPath}/${fileName}`,
                             fileBuffer

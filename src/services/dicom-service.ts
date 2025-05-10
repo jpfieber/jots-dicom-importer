@@ -20,7 +20,6 @@ export class DICOMService {
 
         // Get transfer syntax to determine format
         const transferSyntax = dicomData.string(DicomTags.TransferSyntaxUID);
-        console.log('Transfer Syntax:', transferSyntax);
 
         // Handle raw pixel data (uncompressed)
         if (transferSyntax === '1.2.840.10008.1.2.1' || // Explicit VR Little Endian
@@ -43,12 +42,6 @@ export class DICOMService {
                     buffer[i + 1] = temp;
                 }
             }
-
-            console.log('Extracted raw pixel data:', {
-                length: buffer.length,
-                offset: pixelDataElement.dataOffset,
-                elementLength: pixelDataElement.length
-            });
 
             return {
                 data: buffer,
@@ -104,8 +97,7 @@ export class DICOMService {
     async convertToImage(file: TFile, targetPath?: string): Promise<string> {
         const tempFiles: string[] = [];
         try {
-            console.log(`Processing DICOM file: ${file.path}`);
-            console.log(`Target PNG path: ${targetPath || 'not specified'}`);
+            new Notice(`Processing DICOM file: ${file.path}`);
 
             if (!this.settings.opjPath) {
                 throw new Error('OpenJPEG path is not configured');
@@ -129,20 +121,15 @@ export class DICOMService {
             const { data, needsDecompression } = this.extractPixelData(dicomData);
 
             if (needsDecompression) {
-                console.log('Processing JPEG2000 compressed DICOM');
-
                 // Create temporary file in the same directory as the target PNG
                 const timestamp = Date.now();
                 const targetDir = targetPath ? path.dirname(targetPath) : (file.parent?.path || '');
                 const tempJ2kPath = `${targetDir}/temp_${file.basename}_${timestamp}.j2k`;
                 tempFiles.push(tempJ2kPath);
 
-                console.log(`Creating temporary file at: ${tempJ2kPath}`);
-
                 // Ensure the target directory exists before creating temp file
                 if (!this.app.vault.getAbstractFileByPath(targetDir)) {
                     await this.app.vault.createFolder(targetDir);
-                    console.log(`Created target directory: ${targetDir}`);
                 }
 
                 await this.app.vault.createBinary(tempJ2kPath, data);
@@ -170,18 +157,15 @@ export class DICOMService {
                     }
 
                     const convertedImage = await this.app.vault.readBinary(finalImageFile);
-                    console.log(`Successfully converted JPEG2000 DICOM to PNG (${new Uint8Array(convertedImage).length} bytes)`);
                     return `data:image/png;base64,${Buffer.from(convertedImage).toString('base64')}`;
                 } catch (error) {
                     throw error;
                 }
             } else {
-                console.log('Processing uncompressed DICOM');
                 // For raw pixel data, convert using our PNG encoder
                 const result = await this.convertRawToImage(data, dicomData);
 
                 if (targetPath) {
-                    console.log(`Saving raw DICOM PNG to: ${targetPath}`);
                     // Extract the base64 data and save it
                     const base64Data = result.replace(/^data:image\/png;base64,/, '');
                     const binaryData = Buffer.from(base64Data, 'base64');
@@ -191,12 +175,11 @@ export class DICOMService {
                     const targetDirInVault = this.app.vault.getAbstractFileByPath(targetDir);
                     if (!targetDirInVault) {
                         await this.app.vault.createFolder(targetDir);
-                        console.log(`Created target directory: ${targetDir}`);
                     }
 
                     // Save the PNG file
                     await this.app.vault.createBinary(targetPath, binaryData);
-                    console.log(`Successfully saved PNG file to ${targetPath}`);
+                    new Notice(`Successfully saved PNG file: ${path.basename(targetPath)}`);
                 }
 
                 return result;
@@ -208,11 +191,9 @@ export class DICOMService {
             // Clean up temporary files
             for (const tempPath of tempFiles) {
                 try {
-                    console.log(`Cleaning up temporary file: ${tempPath}`);
                     const tempFile = this.app.vault.getAbstractFileByPath(tempPath);
                     if (tempFile) {
                         await this.app.vault.delete(tempFile);
-                        console.log(`Cleaned up temporary file: ${tempPath}`);
                     }
                 } catch (cleanupError) {
                     console.error(`Failed to clean up temporary file ${tempPath}:`, cleanupError);
@@ -246,18 +227,14 @@ export class DICOMService {
 
     private async convertRawToImage(pixelData: Buffer, dicomData: dicomParser.DataSet): Promise<string> {
         try {
-            console.log('Starting raw DICOM conversion...');
             const columns = dicomData.uint16(DicomTags.Columns) || 0;
             const rows = dicomData.uint16(DicomTags.Rows) || 0;
-            console.log(`Image dimensions: ${columns}x${rows}`);
 
             const bitsAllocated = dicomData.uint16(DicomTags.BitsAllocated) || 16;
             const pixelRepresentation = dicomData.uint16(DicomTags.PixelRepresentation) || 0;
             const samplesPerPixel = dicomData.uint16(DicomTags.SamplesPerPixel) || 1;
-            console.log(`Bits allocated: ${bitsAllocated}, Pixel representation: ${pixelRepresentation}, Samples per pixel: ${samplesPerPixel}`);
 
             const transferSyntax = dicomData.string(DicomTags.TransferSyntaxUID);
-            console.log(`Transfer syntax: ${transferSyntax}`);
 
             const dicomWindowCenter = dicomData.floatString(DicomTags.WindowCenter) || undefined;
             const dicomWindowWidth = dicomData.floatString(DicomTags.WindowWidth) || undefined;
@@ -275,8 +252,6 @@ export class DICOMService {
                 pixels[i] = dataView.getInt16(i * 2, littleEndian);
             }
 
-            console.log(`Created pixel array with ${pixels.length} pixels`);
-
             // Calculate window settings if not provided
             let windowCenter = dicomWindowCenter;
             let windowWidth = dicomWindowWidth;
@@ -293,7 +268,6 @@ export class DICOMService {
                 windowCenter = (max + min) / 2;
                 windowWidth = max - min;
             }
-            console.log(`Window settings - Center: ${windowCenter}, Width: ${windowWidth}`);
 
             // Convert 16-bit to 8-bit using window/level
             const lowValue = windowCenter - (windowWidth / 2);
@@ -347,7 +321,6 @@ export class DICOMService {
                 iendChunk
             ]);
 
-            console.log('Successfully created PNG data');
             return `data:image/png;base64,${pngData.toString('base64')}`;
         } catch (error) {
             console.error('Error during raw DICOM conversion:', error);
