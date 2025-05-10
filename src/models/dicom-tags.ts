@@ -32,15 +32,30 @@ export const DicomTags = {
     SoftwareVersions: 'x00181020',
     ProtocolName: 'x00181030',
 
-    // Image Information
-    ImageType: 'x00080008',
+    // Common Image, SR, and Document Information
     SOPClassUID: 'x00080016',
     SOPInstanceUID: 'x00080018',
+    ContentDate: 'x00080023',
+    ContentTime: 'x00080033',
+    ImageComments: 'x00204000',
+
+    // Report and Document tags
+    DocumentTitle: 'x00420010',
+    DocumentContent: 'x00420012',
+    ProcedureDescription: 'x00400100',
+    CompletionFlag: 'x00400A49',
+    VerificationFlag: 'x00400A493',
+    ObservationDateTime: 'x00400241',
+    ConceptNameCodeSequence: 'x00400A043',
+    TextValue: 'x00400A160',
+
+    // Image Information
+    ImageType: 'x00080008',
     SamplesPerPixel: 'x00280002',
     PhotometricInterpretation: 'x00280004',
     Rows: 'x00280010',
     Columns: 'x00280011',
-    InstanceNumber: 'x00200013', // Add InstanceNumber tag
+    InstanceNumber: 'x00200013',
     PixelSpacing: 'x00280030',
     BitsAllocated: 'x00280100',
     BitsStored: 'x00280101',
@@ -60,8 +75,6 @@ export const DicomTags = {
     SpecificCharacterSet: 'x00080005',
     AcquisitionDate: 'x00080022',
     AcquisitionTime: 'x00080032',
-    ContentDate: 'x00080023',
-    ContentTime: 'x00080033',
     ImagePositionPatient: 'x00200032',
     ImageOrientationPatient: 'x00200037',
     FrameOfReferenceUID: 'x00200052',
@@ -91,7 +104,6 @@ export const DicomTags = {
     DiffusionBValue: 'x00431039',
     DiffusionGradientOrientation: 'x00431040',
     DiffusionDirection: 'x00431041',
-    ImageComments: 'x00204000',
 
     // Presentation Parameters
     PresentationLUTShape: 'x20500020',
