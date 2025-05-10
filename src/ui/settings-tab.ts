@@ -12,7 +12,6 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
         const { containerEl } = this;
 
         containerEl.empty();
-        containerEl.createEl('h2', { text: 'DICOM Handler Settings' });
 
         new Setting(containerEl)
             .setName('Setting 1')

@@ -77,7 +77,8 @@ export class DICOMService {
         throw new Error(`Unsupported transfer syntax: ${transferSyntax}`);
     }
 
-    async convertToImage(file: TFile): Promise<string> {
+    async convertToImage(file: TFile, targetPath?: string): Promise<string> {
+        const tempFiles: string[] = [];
         try {
             if (!this.settings.opjPath) {
                 throw new Error('OpenJPEG path is not configured');
@@ -91,43 +92,41 @@ export class DICOMService {
             const { data, needsDecompression } = this.extractPixelData(dicomData);
 
             if (needsDecompression) {
-                // Create temporary .j2k file in the file's parent folder
-                const j2kPath = `${file.parent?.path}/${Date.now()}.j2k`.replace(/\\/g, '/');
-                await this.app.vault.createBinary(j2kPath, data);
+                // Create temporary .j2k file in system temp directory
+                const timestamp = Date.now();
+                const tempJ2kPath = `${file.parent?.path || ''}/temp_${timestamp}.j2k`;
+                tempFiles.push(tempJ2kPath);
+                await this.app.vault.createBinary(tempJ2kPath, data);
 
                 try {
                     // Get absolute paths for OpenJPEG
                     const vaultPath = (this.app.vault.adapter as any).basePath;
-                    const absoluteInputPath = path.join(vaultPath, j2kPath);
-                    const outputPath = `${file.parent?.path}/${file.basename}.png`.replace(/\\/g, '/');
-                    const absoluteOutputPath = path.join(vaultPath, outputPath);
+                    const absoluteInputPath = path.join(vaultPath, tempJ2kPath);
+
+                    // Create PNG directly in the target location
+                    const finalPngPath = targetPath || `${file.parent?.path}/Images/${file.basename}.png`;
+                    finalPngPath.replace(/\\/g, '/');
+
+                    // Ensure the target directory exists
+                    const targetDir = path.dirname(finalPngPath);
+                    if (!this.app.vault.getAbstractFileByPath(targetDir)) {
+                        await this.app.vault.createFolder(targetDir);
+                    }
+
+                    const absoluteOutputPath = path.join(vaultPath, finalPngPath);
 
                     // Run OpenJPEG with absolute paths
                     await this.runConverter(absoluteInputPath, absoluteOutputPath);
 
-                    // Read the converted image
-                    const finalImageFile = this.app.vault.getAbstractFileByPath(outputPath);
+                    // Read the converted image directly from its final location
+                    const finalImageFile = this.app.vault.getAbstractFileByPath(finalPngPath);
                     if (!finalImageFile || !(finalImageFile instanceof TFile)) {
                         throw new Error('Failed to read converted image');
                     }
 
                     const convertedImage = await this.app.vault.readBinary(finalImageFile);
-                    const base64Image = Buffer.from(convertedImage).toString('base64');
-
-                    // Clean up temporary files
-                    const tempFile = this.app.vault.getAbstractFileByPath(j2kPath);
-                    if (tempFile) {
-                        await this.app.vault.delete(tempFile);
-                    }
-                    await this.app.vault.delete(finalImageFile);
-
-                    return `data:image/png;base64,${base64Image}`;
+                    return `data:image/png;base64,${Buffer.from(convertedImage).toString('base64')}`;
                 } catch (error) {
-                    // Clean up temporary file if conversion fails
-                    const tempFile = this.app.vault.getAbstractFileByPath(j2kPath);
-                    if (tempFile) {
-                        await this.app.vault.delete(tempFile);
-                    }
                     throw error;
                 }
             } else {
@@ -138,6 +137,18 @@ export class DICOMService {
         } catch (error) {
             console.error(`Failed to convert ${file.name}:`, error);
             throw error;
+        } finally {
+            // Clean up temporary j2k file
+            for (const tempPath of tempFiles) {
+                try {
+                    const tempFile = this.app.vault.getAbstractFileByPath(tempPath);
+                    if (tempFile) {
+                        await this.app.vault.delete(tempFile);
+                    }
+                } catch (cleanupError) {
+                    console.error(`Failed to clean up temporary file ${tempPath}:`, cleanupError);
+                }
+            }
         }
     }
 
@@ -147,7 +158,6 @@ export class DICOMService {
 
             // Ensure consistent path handling
             const command = `"${this.settings.opjPath}" -i "${inputPath}" -o "${outputPath}"`;
-            console.log('Running OpenJPEG command:', command);
 
             exec(command, { windowsHide: true }, (error: any, stdout: string, stderr: string) => {
                 if (error) {
@@ -328,10 +338,6 @@ export class DICOMService {
         const dataSet = this.parseDicomData(arrayBuffer);
         return {
             patientName: dataSet.string(DicomTags.PatientName),
-            patientId: dataSet.string(DicomTags.PatientID),
-            studyDate: dataSet.string(DicomTags.StudyDate),
-            modality: dataSet.string(DicomTags.Modality),
-            seriesDescription: dataSet.string(DicomTags.SeriesDescription),
         };
     }
 }
