@@ -16,6 +16,8 @@ export default class DICOMHandlerPlugin extends Plugin {
     dicomService!: DICOMService;
     fileService!: FileService;
     viewerService!: ViewerService;
+    private folderCache: Set<string> = new Set();
+    private pathNormalizeCache: Map<string, string> = new Map();
 
     async onload() {
         await this.loadSettings();
@@ -164,11 +166,14 @@ export default class DICOMHandlerPlugin extends Plugin {
         return str.substring(0, maxLength - 3) + '...';
     }
 
+    private static readonly INVALID_CHARS_REGEX = /[<>:"\/\\|?*\x00-\x1F]/g;
+    private static readonly TRAILING_DOTS_SPACES_REGEX = /[. ]+$/;
+
     private sanitizeFileName(fileName: string): string {
         // Remove dots and spaces from the end of the filename
-        let sanitized = fileName.replace(/[. ]+$/, '');
+        let sanitized = fileName.replace(DICOMHandlerPlugin.TRAILING_DOTS_SPACES_REGEX, '');
         // Replace any other invalid characters
-        sanitized = sanitized.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_');
+        sanitized = sanitized.replace(DICOMHandlerPlugin.INVALID_CHARS_REGEX, '_');
         // Ensure we still have a valid filename
         return sanitized || 'unnamed';
     }
@@ -186,16 +191,32 @@ export default class DICOMHandlerPlugin extends Plugin {
         }
     }
 
+    private normalizePath(path: string): string {
+        const cached = this.pathNormalizeCache.get(path);
+        if (cached) return cached;
+
+        const normalized = path.replace(/\\/g, '/');
+        this.pathNormalizeCache.set(path, normalized);
+        return normalized;
+    }
+
     private async ensureFolderPath(folderPath: string): Promise<void> {
-        const normalizedPath = folderPath.replace(/\\/g, '/');
+        const normalizedPath = this.normalizePath(folderPath);
+        if (this.folderCache.has(normalizedPath)) {
+            return;
+        }
+
         const parts = normalizedPath.split('/').filter(p => p.length > 0);
         let currentPath = '';
 
         for (const part of parts) {
             currentPath = currentPath ? `${currentPath}/${part}` : part;
-            const folder = this.app.vault.getAbstractFileByPath(currentPath);
-            if (!folder) {
-                await this.app.vault.createFolder(currentPath);
+            if (!this.folderCache.has(currentPath)) {
+                const folder = this.app.vault.getAbstractFileByPath(currentPath);
+                if (!folder) {
+                    await this.app.vault.createFolder(currentPath);
+                }
+                this.folderCache.add(currentPath);
             }
         }
     }
