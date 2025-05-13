@@ -123,16 +123,15 @@ export default class DICOMHandlerPlugin extends Plugin {
 
         // Join date and 'Study' with spaced hyphen, then add description
         const restOfParts: string[] = ['Study'];
-        // Removed modality from here since it's typically part of the study description
         if (studyDesc) restOfParts.push(studyDesc);
 
         let studyFolderName = studyDate
-            ? `${studyDate} - ${restOfParts.join('-')}`
-            : restOfParts.join('-');
+            ? `${studyDate} - ${restOfParts.join(' - ')}`
+            : restOfParts.join(' - ');
 
-        // Add patient name if available
+        // Add patient name if available with proper spacing
         if (patientName) {
-            studyFolderName += `-${this.formatPatientName(patientName)}`;
+            studyFolderName += ` - ${this.formatPatientName(patientName)}`;
         }
 
         parts.push(studyFolderName);
@@ -143,12 +142,12 @@ export default class DICOMHandlerPlugin extends Plugin {
         const seriesNum = dataset.string(DicomTags.SeriesNumber);
         const seriesDesc = dataset.string(DicomTags.SeriesDescription);
 
-        // Join 'Series' with the rest using hyphens
+        // Join 'Series' with the rest using spaced hyphens
         const seriesRestOfParts: string[] = ['Series'];
         if (seriesNum) seriesRestOfParts.push(seriesNum);
         if (seriesDesc) seriesRestOfParts.push(seriesDesc);
 
-        const seriesFolderName = seriesRestOfParts.join('-');
+        const seriesFolderName = seriesRestOfParts.join(' - ');
         parts.push(seriesFolderName);
 
         // First sanitize individual folder names
@@ -292,21 +291,37 @@ export default class DICOMHandlerPlugin extends Plugin {
     }
 
     private formatPatientName(name: string): string {
-        // Check if the name contains the DICOM separator '^'
+        // Convert to Title Case and handle the DICOM separator '^'
         if (name.includes('^')) {
             const [lastName, firstName] = name.split('^');
-            return `${firstName} ${lastName}`;
+            return `${this.toTitleCase(firstName)} ${this.toTitleCase(lastName)}`;
         }
-        return name;
+        return this.toTitleCase(name);
     }
 
     private formatName(name: string): string {
-        // Check if the name contains the DICOM separator '^'
+        // Convert to Title Case and handle the DICOM separator '^'
         if (name.includes('^')) {
             const [lastName, firstName] = name.split('^');
-            return `${firstName} ${lastName}`;
+            return `${this.toTitleCase(firstName)} ${this.toTitleCase(lastName)}`;
         }
-        return name;
+        return this.toTitleCase(name);
+    }
+
+    private toTitleCase(str: string): string {
+        // Handle empty or null strings
+        if (!str) return '';
+
+        // Split on word boundaries including spaces, hyphens, and other separators
+        return str.toLowerCase().split(/[\s-]+/).map(word => {
+            // Skip certain words that should remain lowercase
+            const lowerCaseWords = ['and', 'or', 'the', 'in', 'on', 'at', 'to', 'for', 'of'];
+            if (lowerCaseWords.includes(word.toLowerCase())) {
+                return word.toLowerCase();
+            }
+            // Capitalize first letter, rest lowercase
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        }).join(' ');
     }
 
     private async createMetadataNote(dataset: dicomParser.DataSet, folderPath: string) {
