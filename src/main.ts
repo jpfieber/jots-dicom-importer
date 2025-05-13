@@ -115,13 +115,13 @@ export default class DICOMHandlerPlugin extends Plugin {
         // Study folder - use shorter format
         const studyParts: string[] = [];
         const studyDesc = dataset.string(DicomTags.StudyDescription);
-        
+
         // Build study folder name in exact format: "<date> - Study - <description> - <patient>"
         let studyFolderName = '';
         if (studyDate) studyFolderName = studyDate;
         studyFolderName += ' - Study';
         if (studyDesc) studyFolderName += ` - ${this.truncateString(studyDesc, 30)}`;
-        
+
         // Add truncated patient name if available
         const patientName = dataset.string(DicomTags.PatientName);
         if (patientName) {

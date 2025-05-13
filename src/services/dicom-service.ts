@@ -136,10 +136,10 @@ export class DICOMService {
         // Extract all numbers from filename
         const numbers = originalName.match(/\d+/g);
         if (!numbers) return originalName;
-        
+
         // Get the last number in the sequence, which is typically the slice number
         const number = numbers[numbers.length - 1];
-        
+
         // Pad the number to 4 digits
         return number.padStart(4, '0');
     }
@@ -159,7 +159,7 @@ export class DICOMService {
 
             // Normalize the filename
             const normalizedNumber = this.normalizeFileName(file.basename);
-            
+
             // Update target path with normalized number
             if (targetPath) {
                 const targetDir = path.dirname(targetPath);
@@ -235,7 +235,7 @@ export class DICOMService {
 
             if (windowCenter !== undefined && windowWidth !== undefined) {
                 // Use DICOM window/level settings if available
-                options.push('-level', `${windowCenter - windowWidth/2},${windowCenter + windowWidth/2}`);
+                options.push('-level', `${windowCenter - windowWidth / 2},${windowCenter + windowWidth / 2}`);
             } else {
                 // Auto-level and enhance contrast
                 options.push('-auto-level');
