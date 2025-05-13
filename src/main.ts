@@ -455,8 +455,19 @@ export default class DICOMHandlerPlugin extends Plugin {
                 }
             }
 
-            // Only add gallery section for non-SR documents
+            // Only add animation and gallery sections for non-SR documents
             if (!isStructuredReport) {
+                // Check for animation GIF in the series folder
+                const seriesName = folderPath.split('/').pop() || 'series';
+                const gifPath = path.join(folderPath, `${seriesName}.gif`).replace(/\\/g, '/');
+                const gifFile = this.app.vault.getAbstractFileByPath(gifPath);
+
+                // Add animation section if GIF exists
+                if (gifFile instanceof TFile) {
+                    content += `## Animation\n\n`;
+                    content += `![[${gifFile.name}]]\n\n`;
+                }
+
                 // Get all image files in the Images subfolder to create gallery
                 const imagesPath = `${folderPath}/Images`.replace(/\\/g, '/');
                 const imagesFolder = this.app.vault.getAbstractFileByPath(imagesPath);
@@ -622,6 +633,19 @@ export default class DICOMHandlerPlugin extends Plugin {
                 } catch (error) {
                     console.error(`Error importing ${path.basename(filePath)}:`, error);
                     throw error;
+                }
+            }
+
+            onProgress?.({ percentage: 90, message: 'Creating animated GIFs...' });
+
+            // Create animated GIFs for each series before creating metadata notes
+            for (const { folderPath, isReport } of seriesMap.values()) {
+                if (!isReport) {
+                    // Get the series name from the folder path for the GIF name
+                    const seriesFolder = folderPath.split('/').pop() || 'series';
+                    const gifPath = `${folderPath}/${seriesFolder}.gif`;
+                    const imagesPath = `${folderPath}/Images`;
+                    await this.dicomService.createAnimatedGif(imagesPath, gifPath);
                 }
             }
 

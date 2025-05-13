@@ -23,6 +23,11 @@ export interface DICOMHandlerSettings {
     opjPath: string;
     archiveDicomFiles: boolean;    // Whether to archive original DICOM files
     subdirectoryFormat: string;    // Format string for date-based subdirectories
+    // Animation settings
+    createAnimatedGif: boolean;    // Enable/disable GIF creation
+    imagemagickPath: string;       // Path to ImageMagick executable
+    minImagesForGif: number;       // Minimum number of images required for GIF
+    gifFrameDelay: number;         // Delay between frames in milliseconds
 }
 
 export const DEFAULT_SETTINGS: DICOMHandlerSettings = {
@@ -35,7 +40,12 @@ export const DEFAULT_SETTINGS: DICOMHandlerSettings = {
     galleryImageWidth: 150,
     opjPath: '',
     archiveDicomFiles: false,
-    subdirectoryFormat: ''  // Empty string means no date-based subdirectories
+    subdirectoryFormat: '',  // Empty string means no date-based subdirectories
+    // Animation settings defaults
+    createAnimatedGif: false,
+    imagemagickPath: '',
+    minImagesForGif: 5,
+    gifFrameDelay: 250
 };
 
 export class DICOMHandlerSettingsTab extends PluginSettingTab {
@@ -185,6 +195,83 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                     const width = parseInt(value);
                     if (!isNaN(width) && width > 0) {
                         this.plugin.settings.galleryImageWidth = width;
+                        await this.plugin.saveSettings();
+                    }
+                }));
+
+        containerEl.createEl('h2', { text: 'Animation Settings' });
+
+        new Setting(containerEl)
+            .setName('Create Animated GIFs')
+            .setDesc('Enable creation of animated GIFs from DICOM series')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.createAnimatedGif)
+                .onChange(async (value) => {
+                    this.plugin.settings.createAnimatedGif = value;
+                    await this.plugin.saveSettings();
+                    this.display(); // Refresh to show/hide dependent settings
+                }));
+
+        // Create a container for animation-dependent settings
+        const animationSettingsContainer = containerEl.createDiv();
+        animationSettingsContainer.style.display = this.plugin.settings.createAnimatedGif ? 'block' : 'none';
+
+        new Setting(animationSettingsContainer)
+            .setName('ImageMagick Path')
+            .setDesc('Path to ImageMagick convert executable')
+            .addText(text => text
+                .setPlaceholder('C:\\Program Files\\ImageMagick\\magick.exe')
+                .setValue(this.plugin.settings.imagemagickPath)
+                .onChange(async (value) => {
+                    const normalizedPath = value.replace(/\//g, '\\');
+                    this.plugin.settings.imagemagickPath = normalizedPath;
+                    await this.plugin.saveSettings();
+                }))
+            .addButton(button =>
+                button
+                    .setButtonText('Browse...')
+                    .onClick(() => {
+                        // @ts-ignore
+                        const { dialog } = require('electron').remote;
+                        dialog.showOpenDialog({
+                            properties: ['openFile'],
+                            filters: [
+                                { name: 'Executable', extensions: ['exe'] }
+                            ]
+                        }).then(async (result: OpenDialogReturnValue) => {
+                            if (!result.canceled && result.filePaths.length > 0) {
+                                const exePath = result.filePaths[0];
+                                this.plugin.settings.imagemagickPath = exePath;
+                                await this.plugin.saveSettings();
+                                this.display();
+                            }
+                        });
+                    }));
+
+        new Setting(animationSettingsContainer)
+            .setName('Minimum Images')
+            .setDesc('Minimum number of images required to create an animated GIF')
+            .addText(text => text
+                .setPlaceholder('5')
+                .setValue(String(this.plugin.settings.minImagesForGif))
+                .onChange(async (value) => {
+                    const num = parseInt(value);
+                    if (!isNaN(num) && num > 0) {
+                        this.plugin.settings.minImagesForGif = num;
+                        await this.plugin.saveSettings();
+                    }
+                }));
+
+        new Setting(animationSettingsContainer)
+            .setName('Frame Delay')
+            .setDesc('Delay between frames in milliseconds (1000 = 1 second)')
+            .addText(text => text
+                .setPlaceholder('250')
+                .setValue(String(this.plugin.settings.gifFrameDelay))
+                .onChange(async (value) => {
+                    const delay = parseInt(value);
+                    if (!isNaN(delay) && delay > 0) {
+                        this.plugin.settings.gifFrameDelay = delay;
                         await this.plugin.saveSettings();
                     }
                 }));

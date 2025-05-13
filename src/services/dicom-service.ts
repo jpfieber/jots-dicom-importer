@@ -1,4 +1,4 @@
-import { TFile, App, Notice } from 'obsidian';
+import { TFile, App, Notice, TFolder, TAbstractFile } from 'obsidian';
 import dicomParser from 'dicom-parser';
 import { DICOMHandlerSettings } from '../settings';
 import { DicomTags } from '../models/dicom-tags';
@@ -438,5 +438,53 @@ export class DICOMService {
         }
 
         return reportText;
+    }
+
+    async createAnimatedGif(imagesPath: string, outputPath: string): Promise<void> {
+        if (!this.settings.createAnimatedGif || !this.settings.imagemagickPath) {
+            return;
+        }
+
+        try {
+            // Get a list of PNG files in the Images folder
+            const imagesFolder = this.app.vault.getAbstractFileByPath(imagesPath);
+            if (!imagesFolder || !(imagesFolder instanceof TFolder)) {
+                return;
+            }
+
+            const pngFiles = imagesFolder.children
+                .filter((file: TAbstractFile): file is TFile =>
+                    file instanceof TFile && file.extension === 'png')
+                .sort((a, b) => a.name.localeCompare(b.name));
+
+            if (pngFiles.length < this.settings.minImagesForGif) {
+                return;
+            }
+
+            // Get the vault path for constructing absolute paths
+            const vaultPath = (this.app.vault.adapter as any).basePath;
+
+            // Create the ImageMagick command with proper delay and output settings
+            const inputFiles = pngFiles.map(file =>
+                `"${path.join(vaultPath, file.path)}"`
+            ).join(' ');
+
+            return new Promise((resolve, reject) => {
+                const { exec } = require('child_process');
+                const command = `"${this.settings.imagemagickPath}" -delay ${this.settings.gifFrameDelay / 10} ${inputFiles} -loop 0 "${path.join(vaultPath, outputPath)}"`;
+
+                exec(command, { windowsHide: true }, (error: any, stdout: string, stderr: string) => {
+                    if (error) {
+                        console.error('ImageMagick error:', stderr);
+                        reject(new Error(`Failed to create animated GIF: ${error.message}`));
+                        return;
+                    }
+                    resolve();
+                });
+            });
+        } catch (error) {
+            console.error('Error creating animated GIF:', error);
+            throw error;
+        }
     }
 }
