@@ -115,13 +115,13 @@ export default class DICOMHandlerPlugin extends Plugin {
         // Study folder - use shorter format
         const studyParts: string[] = [];
         const studyDesc = dataset.string(DicomTags.StudyDescription);
-
-        // Use date only without "Study" prefix to save characters
-        if (studyDate) studyParts.push(studyDate);
-        if (studyDesc) studyParts.push(this.truncateString(studyDesc, 30));
-
-        let studyFolderName = studyParts.join(' - ');
-
+        
+        // Build study folder name in exact format: "<date> - Study - <description> - <patient>"
+        let studyFolderName = '';
+        if (studyDate) studyFolderName = studyDate;
+        studyFolderName += ' - Study';
+        if (studyDesc) studyFolderName += ` - ${this.truncateString(studyDesc, 30)}`;
+        
         // Add truncated patient name if available
         const patientName = dataset.string(DicomTags.PatientName);
         if (patientName) {
@@ -130,19 +130,21 @@ export default class DICOMHandlerPlugin extends Plugin {
 
         parts.push(studyFolderName);
 
-        // Series folder - use shorter format
+        // Series folder - format: "<date> - Series - <description>"
         const seriesNum = dataset.string(DicomTags.SeriesNumber);
         const seriesDesc = dataset.string(DicomTags.SeriesDescription);
 
-        // Simplified series naming
-        const seriesParts: string[] = [];
-        if (seriesNum) seriesParts.push(seriesNum);
-        if (seriesDesc) seriesParts.push(this.truncateString(seriesDesc, 30));
-
-        const seriesFolderName = seriesParts.join(' - ');
-        if (seriesFolderName) {
-            parts.push(seriesFolderName);
+        // Build series folder name in exact format
+        let seriesFolderName = '';
+        if (studyDate) seriesFolderName = studyDate;
+        seriesFolderName += ' - Series';
+        if (seriesDesc) {
+            seriesFolderName += ` - ${this.truncateString(seriesDesc, 30)}`;
+        } else if (seriesNum) {
+            seriesFolderName += ` - ${seriesNum}`;
         }
+
+        parts.push(seriesFolderName);
 
         // Sanitize and join paths
         const sanitizedParts = parts.map(part => this.sanitizeFileName(part));

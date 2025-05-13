@@ -11,7 +11,7 @@ export const TransferSyntaxMap = new Map<string, ImageConverter>([
     ['1.2.840.10008.1.2.4.90', {
         utility: 'opj_decompress',
         outputFormat: 'png',
-        args: ['-i', '{input}', '-o', '{output}'],
+        args: ['-i', '{input}', '-o', '{output}', process.platform === 'win32' ? '2>nul' : '2>/dev/null'],  // Suppress stderr warnings
         tempExtension: 'j2k'
     }],
     // JPEG Lossless, Non-Hierarchical (Process 14)
@@ -25,7 +25,7 @@ export const TransferSyntaxMap = new Map<string, ImageConverter>([
     ['default', {
         utility: 'opj_decompress',
         outputFormat: 'png',
-        args: ['-i', '{input}', '-o', '{output}'],
+        args: ['-i', '{input}', '-o', '{output}', process.platform === 'win32' ? '2>nul' : '2>/dev/null'],
         tempExtension: 'j2k'
     }]
 ]);

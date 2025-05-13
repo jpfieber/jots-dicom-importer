@@ -46,7 +46,7 @@ export const DEFAULT_SETTINGS: DICOMHandlerSettings = {
     // Animation settings defaults
     createAnimatedGif: false,
     imagemagickPath: '',         // Will be synced with magickPath
-    minImagesForGif: 5,
+    minImagesForGif: 2,          // Lowered from 5 to 2
     gifFrameDelay: 250
 };
 
