@@ -126,4 +126,13 @@ export class ImportModal extends Modal {
         const { contentEl } = this;
         contentEl.empty();
     }
+
+    onSubmit() {
+        try {
+            // ...existing code...
+        } catch (error) {
+            console.error('Error during import:', error);
+            new Notice('Error during import. Please check the console for details.');
+        }
+    }
 }

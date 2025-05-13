@@ -22,7 +22,7 @@ export default class DICOMHandlerPlugin extends Plugin {
 
         this.dicomService = new DICOMService(this.app, this.settings);
         this.fileService = new FileService();
-        this.viewerService = new ViewerService();
+        this.viewerService = new ViewerService(this.app, this.dicomService);
 
         this.addSettingTab(new DICOMHandlerSettingsTab(this.app, this));
 
@@ -112,49 +112,54 @@ export default class DICOMHandlerPlugin extends Plugin {
             }
         }
 
-        // Study folder - always included with mandatory components
+        // Study folder - use shorter format
         const studyParts: string[] = [];
-
         const studyDesc = dataset.string(DicomTags.StudyDescription);
-        const patientName = dataset.string(DicomTags.PatientName);
 
-        // Always put date first if available
+        // Use date only without "Study" prefix to save characters
         if (studyDate) studyParts.push(studyDate);
+        if (studyDesc) studyParts.push(this.truncateString(studyDesc, 30));
 
-        // Join date and 'Study' with spaced hyphen, then add description
-        const restOfParts: string[] = ['Study'];
-        if (studyDesc) restOfParts.push(studyDesc);
+        let studyFolderName = studyParts.join(' - ');
 
-        let studyFolderName = studyDate
-            ? `${studyDate} - ${restOfParts.join(' - ')}`
-            : restOfParts.join(' - ');
-
-        // Add patient name if available with proper spacing
+        // Add truncated patient name if available
+        const patientName = dataset.string(DicomTags.PatientName);
         if (patientName) {
-            studyFolderName += ` - ${this.formatPatientName(patientName)}`;
+            studyFolderName += ` - ${this.truncateString(this.formatPatientName(patientName), 20)}`;
         }
 
         parts.push(studyFolderName);
 
-        // Series folder - always included with mandatory components
-        const seriesParts: string[] = [];
-
+        // Series folder - use shorter format
         const seriesNum = dataset.string(DicomTags.SeriesNumber);
         const seriesDesc = dataset.string(DicomTags.SeriesDescription);
 
-        // Join 'Series' with the rest using spaced hyphens
-        const seriesRestOfParts: string[] = ['Series'];
-        if (seriesNum) seriesRestOfParts.push(seriesNum);
-        if (seriesDesc) seriesRestOfParts.push(seriesDesc);
+        // Simplified series naming
+        const seriesParts: string[] = [];
+        if (seriesNum) seriesParts.push(seriesNum);
+        if (seriesDesc) seriesParts.push(this.truncateString(seriesDesc, 30));
 
-        const seriesFolderName = seriesRestOfParts.join(' - ');
-        parts.push(seriesFolderName);
+        const seriesFolderName = seriesParts.join(' - ');
+        if (seriesFolderName) {
+            parts.push(seriesFolderName);
+        }
 
-        // First sanitize individual folder names
-        const sanitizedParts = parts.map(part => part.replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_'));
+        // Sanitize and join paths
+        const sanitizedParts = parts.map(part => this.sanitizeFileName(part));
 
-        // Then join with the base path to create the full path
-        return path.join(basePath, ...sanitizedParts).replace(/\\/g, '/');
+        // Add Windows long path prefix if needed
+        let fullPath = path.join(basePath, ...sanitizedParts).replace(/\\/g, '/');
+        if (fullPath.length > 250 && process.platform === 'win32' && !fullPath.startsWith('\\\\?\\')) {
+            fullPath = `\\\\?\\${fullPath}`;
+        }
+
+        return fullPath;
+    }
+
+    private truncateString(str: string, maxLength: number): string {
+        if (!str) return '';
+        if (str.length <= maxLength) return str;
+        return str.substring(0, maxLength - 3) + '...';
     }
 
     private sanitizeFileName(fileName: string): string {
@@ -631,8 +636,9 @@ export default class DICOMHandlerPlugin extends Plugin {
                         const imagesPath = `${organizedPath}/Images`;
                         await this.ensureFolderPath(imagesPath);
 
-                        // Create a proper TFile object without including the vault path
-                        const targetPath = `${imagesPath}/${fileName}.png`;
+                        // Remove the original extension (if any) before adding .png
+                        const baseFileName = path.parse(fileName).name;
+                        const targetPath = `${imagesPath}/${baseFileName}.png`;
                         await this.dicomService.convertToImage({
                             path: filePath,
                             name: fileName,
@@ -688,7 +694,12 @@ export default class DICOMHandlerPlugin extends Plugin {
                     const seriesFolder = folderPath.split('/').pop() || 'series';
                     const gifPath = `${folderPath}/${seriesFolder}.gif`;
                     const imagesPath = `${folderPath}/Images`;
-                    await this.dicomService.createAnimatedGif(imagesPath, gifPath);
+                    try {
+                        await this.dicomService.createAnimatedGif(imagesPath, gifPath);
+                    } catch (error) {
+                        console.error(`Failed to create GIF for series ${seriesFolder}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                        // Continue with other series rather than failing the whole process
+                    }
                 }
             }
 

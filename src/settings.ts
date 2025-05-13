@@ -13,19 +13,20 @@ interface OpenDialogReturnValue {
 const electron = require('electron');
 
 export interface DICOMHandlerSettings {
-    imageFormat: 'png';  // Always PNG with OpenJPEG
+    imageFormat: 'png';  // Always PNG output
     autoConvert: boolean;
     sourceFolderPath: string;    // External folder with DICOM files
     destinationFolderPath: string; // Vault folder for converted images
     dicomIdentification: 'extension' | 'noExtension';
     dicomExtension: string;
     galleryImageWidth: number;
-    opjPath: string;
+    opjPath: string;             // OpenJPEG path for JPEG 2000
+    magickPath: string;          // ImageMagick path for JPEG Lossless and other formats
     archiveDicomFiles: boolean;    // Whether to archive original DICOM files
     subdirectoryFormat: string;    // Format string for date-based subdirectories
     // Animation settings
     createAnimatedGif: boolean;    // Enable/disable GIF creation
-    imagemagickPath: string;       // Path to ImageMagick executable
+    imagemagickPath: string;       // Path to ImageMagick executable (same as magickPath)
     minImagesForGif: number;       // Minimum number of images required for GIF
     gifFrameDelay: number;         // Delay between frames in milliseconds
 }
@@ -39,11 +40,12 @@ export const DEFAULT_SETTINGS: DICOMHandlerSettings = {
     dicomExtension: 'dcm',
     galleryImageWidth: 150,
     opjPath: '',
+    magickPath: '',              // ImageMagick path for JPEG Lossless
     archiveDicomFiles: false,
-    subdirectoryFormat: '',  // Empty string means no date-based subdirectories
+    subdirectoryFormat: '',      // Empty string means no date-based subdirectories
     // Animation settings defaults
     createAnimatedGif: false,
-    imagemagickPath: '',
+    imagemagickPath: '',         // Will be synced with magickPath
     minImagesForGif: 5,
     gifFrameDelay: 250
 };
@@ -61,20 +63,71 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
         containerEl.empty();
 
         // OpenJPEG Configuration
-        containerEl.createEl('h2', { text: 'OpenJPEG Configuration' });
+        containerEl.createEl('h2', { text: 'DICOM Image Converters' });
 
         new Setting(containerEl)
-            .setName('opj_decompress Path')
-            .setDesc('Path to opj_decompress executable from OpenJPEG')
+            .setName('OpenJPEG Path')
+            .setDesc('Path to opj_decompress executable for JPEG 2000 DICOM images')
             .addText(text => text
                 .setPlaceholder('C:\\OpenJPEG\\bin\\opj_decompress.exe')
                 .setValue(this.plugin.settings.opjPath)
                 .onChange(async (value) => {
-                    // Convert any forward slashes to backslashes for Windows
                     const normalizedPath = value.replace(/\//g, '\\');
                     this.plugin.settings.opjPath = normalizedPath;
                     await this.plugin.saveSettings();
-                }));
+                }))
+            .addButton(button =>
+                button
+                    .setButtonText('Browse...')
+                    .onClick(() => {
+                        // @ts-ignore
+                        const { dialog } = require('electron').remote;
+                        dialog.showOpenDialog({
+                            properties: ['openFile'],
+                            filters: [
+                                { name: 'Executable', extensions: ['exe'] }
+                            ]
+                        }).then(async (result: OpenDialogReturnValue) => {
+                            if (!result.canceled && result.filePaths.length > 0) {
+                                const exePath = result.filePaths[0];
+                                this.plugin.settings.opjPath = exePath;
+                                await this.plugin.saveSettings();
+                                this.display();
+                            }
+                        });
+                    }));
+
+        new Setting(containerEl)
+            .setName('ImageMagick Path')
+            .setDesc('Path to ImageMagick convert executable (required for JPEG Lossless conversion)')
+            .addText(text => text
+                .setPlaceholder('C:\\Program Files\\ImageMagick\\magick.exe')
+                .setValue(this.plugin.settings.magickPath)
+                .onChange(async (value) => {
+                    const normalizedPath = value.replace(/\//g, '\\');
+                    this.plugin.settings.magickPath = normalizedPath;
+                    await this.plugin.saveSettings();
+                }))
+            .addButton(button =>
+                button
+                    .setButtonText('Browse...')
+                    .onClick(() => {
+                        // @ts-ignore
+                        const { dialog } = require('electron').remote;
+                        dialog.showOpenDialog({
+                            properties: ['openFile'],
+                            filters: [
+                                { name: 'Executable', extensions: ['exe'] }
+                            ]
+                        }).then(async (result: OpenDialogReturnValue) => {
+                            if (!result.canceled && result.filePaths.length > 0) {
+                                const exePath = result.filePaths[0];
+                                this.plugin.settings.magickPath = exePath;
+                                await this.plugin.saveSettings();
+                                this.display();
+                            }
+                        });
+                    }));
 
         // DICOM identification settings
         containerEl.createEl('h2', { text: 'DICOM File Identification' });
@@ -254,7 +307,7 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                     }));
 
         new Setting(animationSettingsContainer)
-            .setName('Minimum Images')
+            .setName('Minimum Images for GIF')
             .setDesc('Minimum number of images required to create an animated GIF')
             .addText(text => text
                 .setPlaceholder('5')

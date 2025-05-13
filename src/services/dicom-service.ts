@@ -7,6 +7,8 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 
 export class DICOMService {
+    private lastTransferSyntax: string | undefined;
+
     constructor(
         private app: App,
         private settings: DICOMHandlerSettings
@@ -52,172 +54,323 @@ export class DICOMService {
         // Handle JPEG2000 compressed data
         if (transferSyntax === '1.2.840.10008.1.2.4.90' || // JPEG 2000 Lossless
             transferSyntax === '1.2.840.10008.1.2.4.91') { // JPEG 2000 Lossy
+            return this.extractJPEG2000Data(dicomData, pixelDataElement);
+        }
 
-            const byteArray = new Uint8Array(dicomData.byteArray.buffer);
-            let position = pixelDataElement.dataOffset;
-
-            // Skip Basic Offset Table if present
-            if (byteArray[position] === 0xFE && byteArray[position + 1] === 0xFF &&
-                byteArray[position + 2] === 0x00 && byteArray[position + 3] === 0xE0) {
-                const botLength =
-                    byteArray[position + 4] |
-                    (byteArray[position + 5] << 8) |
-                    (byteArray[position + 6] << 16) |
-                    (byteArray[position + 7] << 24);
-                position += 8 + botLength;
-            }
-
-            // Find JPEG2000 stream
-            if (position < byteArray.length - 8 &&
-                byteArray[position] === 0xFE && byteArray[position + 1] === 0xFF &&
-                byteArray[position + 2] === 0x00 && byteArray[position + 3] === 0xE0) {
-
-                const itemLength =
-                    byteArray[position + 4] |
-                    (byteArray[position + 5] << 8) |
-                    (byteArray[position + 6] << 16) |
-                    (byteArray[position + 7] << 24);
-
-                position += 8;
-
-                const j2kData = Buffer.from(byteArray.buffer, byteArray.byteOffset + position, itemLength);
-
-                return {
-                    data: j2kData,
-                    needsDecompression: true
-                };
-            }
-
-            throw new Error('Could not find JPEG2000 stream after Basic Offset Table');
+        // Handle JPEG Lossless compressed data
+        if (transferSyntax === '1.2.840.10008.1.2.4.70') { // JPEG Lossless
+            return this.extractJPEGLosslessData(dicomData, pixelDataElement);
         }
 
         throw new Error(`Unsupported transfer syntax: ${transferSyntax}`);
     }
 
+    private extractJPEG2000Data(dicomData: dicomParser.DataSet, pixelDataElement: any): { data: Buffer, needsDecompression: boolean } {
+        const byteArray = new Uint8Array(dicomData.byteArray.buffer);
+        let position = pixelDataElement.dataOffset;
+
+        // Skip Basic Offset Table if present
+        if (byteArray[position] === 0xFE && byteArray[position + 1] === 0xFF &&
+            byteArray[position + 2] === 0x00 && byteArray[position + 3] === 0xE0) {
+            const botLength =
+                byteArray[position + 4] |
+                (byteArray[position + 5] << 8) |
+                (byteArray[position + 6] << 16) |
+                (byteArray[position + 7] << 24);
+            position += 8 + botLength;
+        }
+
+        // Find JPEG2000 stream
+        if (position < byteArray.length - 8 &&
+            byteArray[position] === 0xFE && byteArray[position + 1] === 0xFF &&
+            byteArray[position + 2] === 0x00 && byteArray[position + 3] === 0xE0) {
+
+            const itemLength =
+                byteArray[position + 4] |
+                (byteArray[position + 5] << 8) |
+                (byteArray[position + 6] << 16) |
+                (byteArray[position + 7] << 24);
+
+            position += 8;
+
+            const j2kData = Buffer.from(byteArray.buffer, byteArray.byteOffset + position, itemLength);
+
+            return {
+                data: j2kData,
+                needsDecompression: true
+            };
+        }
+
+        throw new Error('Could not find JPEG2000 stream after Basic Offset Table');
+    }
+
+    private extractJPEGLosslessData(dicomData: dicomParser.DataSet, pixelDataElement: any): { data: Buffer, needsDecompression: boolean } {
+        const byteArray = new Uint8Array(dicomData.byteArray.buffer);
+        let position = pixelDataElement.dataOffset;
+
+        // Find JPEG header (SOI marker: 0xFFD8)
+        while (position < byteArray.length - 2) {
+            if (byteArray[position] === 0xFF && byteArray[position + 1] === 0xD8) {
+                // Found JPEG header, now look for end marker (EOI: 0xFFD9)
+                let endPosition = position + 2;
+                while (endPosition < byteArray.length - 2) {
+                    if (byteArray[endPosition] === 0xFF && byteArray[endPosition + 1] === 0xD9) {
+                        // Found complete JPEG frame
+                        const jpegData = Buffer.from(byteArray.buffer, byteArray.byteOffset + position, endPosition - position + 2);
+                        return {
+                            data: jpegData,
+                            needsDecompression: true
+                        };
+                    }
+                    endPosition++;
+                }
+            }
+            position++;
+        }
+
+        throw new Error('Could not find valid JPEG Lossless frame in DICOM data');
+    }
+
     async convertToImage(file: TFile, targetPath?: string): Promise<string> {
         const tempFiles: string[] = [];
+        let result: string | undefined;
+
         try {
-            if (!this.settings.opjPath) {
-                throw new Error('OpenJPEG path is not configured');
+            // Check for ImageMagick
+            if (!this.settings.magickPath) {
+                throw new Error('ImageMagick path is not configured');
             }
 
-            // Read DICOM data for metadata
             const arrayBuffer = await this.loadDICOMFile(file);
             const dicomData = this.parseDicomData(arrayBuffer);
 
-            // Check if this is a Structured Report FIRST
-            const sopClassUID = dicomData.string(DicomTags.SOPClassUID);
-            const isStructuredReport = sopClassUID === '1.2.840.10008.5.1.4.1.1.88.11' || // Basic Text SR
-                sopClassUID === '1.2.840.10008.5.1.4.1.1.88.22' || // Enhanced SR
-                sopClassUID === '1.2.840.10008.5.1.4.1.1.88.33';  // Comprehensive SR
-
-            if (isStructuredReport) {
-                throw new Error('This is a Structured Report (SR) document, not an image');
-            }
+            // Get and store transfer syntax before extracting pixel data
+            this.lastTransferSyntax = dicomData.string(DicomTags.TransferSyntaxUID) || 'default';
 
             // Only try to extract pixel data for non-SR documents
             const { data, needsDecompression } = this.extractPixelData(dicomData);
 
+            // Get window/level settings from DICOM if available
+            const windowCenter = dicomData.floatString(DicomTags.WindowCenter);
+            const windowWidth = dicomData.floatString(DicomTags.WindowWidth);
+            const rescaleSlope = dicomData.floatString(DicomTags.RescaleSlope) || 1;
+            const rescaleIntercept = dicomData.floatString(DicomTags.RescaleIntercept) || 0;
+
+            // Create a temporary file for the raw pixel data
+            const os = require('os');
+            const crypto = require('crypto');
+            const hash = crypto.createHash('md5').update(file.basename).digest('hex').substring(0, 8);
+            const tempRawPath = path.join(os.tmpdir(), `dicom_raw_${hash}.pgm`);
+            tempFiles.push(tempRawPath);
+
             if (needsDecompression) {
-                // Create temporary file in the same directory as the target PNG
-                const timestamp = Date.now();
-                const targetDir = targetPath ? path.dirname(targetPath) : (file.parent?.path || '');
-                const tempJ2kPath = `${targetDir}/temp_${file.basename}_${timestamp}.j2k`;
-                tempFiles.push(tempJ2kPath);
+                // For compressed data, we'll need an intermediate file
+                const converter = getDicomConverter(this.lastTransferSyntax);
+                const tempCompressedPath = path.join(os.tmpdir(), `dicom_tmp_${hash}.${converter.tempExtension}`);
+                tempFiles.push(tempCompressedPath);
 
-                // Ensure the target directory exists before creating temp file
-                if (!this.app.vault.getAbstractFileByPath(targetDir)) {
-                    await this.app.vault.createFolder(targetDir);
-                }
+                // Write the compressed data
+                await fs.writeFile(tempCompressedPath, data);
 
-                await this.app.vault.createBinary(tempJ2kPath, data);
-
-                try {
-                    // Get absolute paths for OpenJPEG
-                    const vaultPath = (this.app.vault.adapter as any).basePath;
-                    const absoluteInputPath = path.join(vaultPath, tempJ2kPath);
-
-                    // Create PNG directly in the target location
-                    const finalPngPath = targetPath || path.join(file.parent?.path || '', 'Images', `${file.basename}.png`);
-
-                    // Create absolute output path only if the target path is relative
-                    const absoluteOutputPath = targetPath?.startsWith('C:') || targetPath?.startsWith('/')
-                        ? targetPath
-                        : path.join(vaultPath, finalPngPath);
-
-                    // Run OpenJPEG with correct paths
-                    await this.runConverter(absoluteInputPath, absoluteOutputPath);
-
-                    // Read the converted image
-                    const finalImageFile = this.app.vault.getAbstractFileByPath(finalPngPath);
-                    if (!finalImageFile || !(finalImageFile instanceof TFile)) {
-                        throw new Error('Failed to read converted image');
-                    }
-
-                    const convertedImage = await this.app.vault.readBinary(finalImageFile);
-                    return `data:image/png;base64,${Buffer.from(convertedImage).toString('base64')}`;
-                } catch (error) {
-                    throw error;
+                // Decompress first
+                if (converter.utility === 'magick') {
+                    await this.runImageMagickCommand(tempCompressedPath, tempRawPath, []);
+                } else {
+                    await this.runConverter(tempCompressedPath, tempRawPath);
                 }
             } else {
-                // For raw pixel data, convert using our PNG encoder
-                const result = await this.convertRawToImage(data, dicomData);
+                // For raw data, write PGM file directly
+                const columns = dicomData.uint16(DicomTags.Columns) || 0;
+                const rows = dicomData.uint16(DicomTags.Rows) || 0;
+                const bitsAllocated = dicomData.uint16(DicomTags.BitsAllocated) || 16;
 
-                if (targetPath) {
-                    // Extract the base64 data and save it
-                    const base64Data = result.replace(/^data:image\/png;base64,/, '');
-                    const binaryData = Buffer.from(base64Data, 'base64');
+                // Create PGM header
+                const pgmHeader = Buffer.from(`P5\n${columns} ${rows}\n${Math.pow(2, bitsAllocated) - 1}\n`);
 
-                    // Ensure target directory exists
-                    const targetDir = path.dirname(targetPath);
-                    const targetDirInVault = this.app.vault.getAbstractFileByPath(targetDir);
-                    if (!targetDirInVault) {
-                        await this.app.vault.createFolder(targetDir);
-                    }
-
-                    // Save the PNG file
-                    await this.app.vault.createBinary(targetPath, binaryData);
-                }
-
-                return result;
+                // Write PGM file with header and pixel data
+                await fs.writeFile(tempRawPath, Buffer.concat([pgmHeader, data]));
             }
+
+            // Ensure we have an absolute path for the target
+            const vaultPath = (this.app.vault.adapter as any).basePath;
+            const absoluteTargetPath = targetPath?.startsWith('C:') || targetPath?.startsWith('/')
+                ? targetPath
+                : path.join(vaultPath, targetPath || '');
+
+            if (absoluteTargetPath.length >= 260) {
+                const shortenedPath = this.shortenPath(absoluteTargetPath);
+                targetPath = shortenedPath;
+            }
+
+            // Create target directory if needed
+            const targetDir = path.dirname(absoluteTargetPath);
+            await fs.mkdir(targetDir, { recursive: true }).catch(err => {
+                throw err;
+            });
+
+            // Build ImageMagick command options for contrast enhancement
+            const options = [];
+
+            if (windowCenter !== undefined && windowWidth !== undefined) {
+                // Use DICOM window/level settings if available
+                options.push('-level', `${windowCenter - windowWidth / 2},${windowCenter + windowWidth / 2}`);
+            } else {
+                // Auto-level and enhance contrast
+                options.push('-auto-level');
+                options.push('-contrast-stretch', '2%');
+                options.push('-sigmoidal-contrast', '3,50%');
+            }
+
+            // Add brightness and gamma adjustment
+            options.push('-brightness-contrast', '20,10');
+            options.push('-gamma', '0.8');
+
+            // Run ImageMagick with contrast enhancement
+            await this.runImageMagickCommand(tempRawPath, absoluteTargetPath, options);
+
+            // Convert the file to base64 for return
+            const convertedData = await fs.readFile(absoluteTargetPath);
+            result = `data:image/png;base64,${convertedData.toString('base64')}`;
+
+            return result;
         } catch (error) {
-            console.error(`Failed to convert ${file.name}:`, error);
+            if (error instanceof Error) {
+                const code = (error as any).code;
+                if (code === 'ENAMETOOLONG') {
+                    console.error('ENAMETOOLONG error details:', {
+                        inputFile: {
+                            path: file.path,
+                            length: file.path.length
+                        },
+                        targetPath: targetPath ? {
+                            path: targetPath,
+                            length: targetPath.length
+                        } : undefined,
+                        tempFiles: tempFiles.map(t => ({
+                            path: t,
+                            length: t.length
+                        }))
+                    });
+                }
+                console.error('Conversion failed:', {
+                    error: error.message,
+                    code: (error as any).code,
+                    stack: error.stack
+                });
+            }
             throw error;
         } finally {
             // Clean up temporary files
             for (const tempPath of tempFiles) {
                 try {
-                    const tempFile = this.app.vault.getAbstractFileByPath(tempPath);
-                    if (tempFile) {
-                        await this.app.vault.delete(tempFile);
-                    }
+                    await fs.access(tempPath).then(
+                        () => fs.unlink(tempPath).catch(e => {
+                            console.error('Failed to delete temp file:', e);
+                        }),
+                        () => { /* File doesn't exist, no need to delete */ }
+                    );
                 } catch (cleanupError) {
-                    console.error(`Failed to clean up temporary file ${tempPath}:`, cleanupError);
+                    console.error('Failed to check/cleanup temp file:', cleanupError);
                 }
             }
         }
+    }
+
+    private async runImageMagickCommand(inputPath: string, outputPath: string, options: string[]): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const { exec } = require('child_process');
+
+            // Build the ImageMagick command with options
+            const command = `"${this.settings.magickPath}" "${inputPath}" ${options.join(' ')} "${outputPath}"`;
+
+            console.log('Debug - ImageMagick command:', command);
+
+            exec(command, { windowsHide: true }, async (error: any, stdout: string, stderr: string) => {
+                if (error) {
+                    reject(new Error(`ImageMagick conversion failed: ${error.message}\n${stderr}`));
+                    return;
+                }
+
+                // Verify the output file exists and has content
+                try {
+                    const exists = await fs.access(outputPath)
+                        .then(() => true)
+                        .catch(() => false);
+
+                    if (!exists) {
+                        reject(new Error(`Output file not created at ${outputPath}`));
+                        return;
+                    }
+
+                    const stats = await fs.stat(outputPath);
+                    if (stats.size === 0) {
+                        reject(new Error('Output file was created but is empty'));
+                        return;
+                    }
+
+                    resolve();
+                } catch (error: unknown) {
+                    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+                    reject(new Error(`Failed to verify output file: ${errorMessage}`));
+                }
+            });
+        });
     }
 
     private async runConverter(inputPath: string, outputPath: string): Promise<void> {
         return new Promise((resolve, reject) => {
             const { exec } = require('child_process');
 
-            // Ensure consistent path handling
-            const command = `"${this.settings.opjPath}" -i "${inputPath}" -o "${outputPath}"`;
+            // Get the converter settings based on transfer syntax
+            const transferSyntax = this.lastTransferSyntax || 'default';
+            const converter = getDicomConverter(transferSyntax);
 
-            exec(command, { windowsHide: true }, (error: any, stdout: string, stderr: string) => {
+            // Ensure paths are absolute and properly quoted
+            const normalizedInputPath = path.resolve(inputPath);
+            const normalizedOutputPath = path.resolve(outputPath);
+
+            // Build command based on the utility
+            let command;
+            if (converter.utility === 'magick') {
+                command = `"${this.settings.magickPath}" "${normalizedInputPath}" "${normalizedOutputPath}"`;
+            } else {
+                command = `"${this.settings.opjPath}" -i "${normalizedInputPath}" -o "${normalizedOutputPath}"`;
+            }
+
+            exec(command, { windowsHide: true }, async (error: any, stdout: string, stderr: string) => {
                 if (error) {
-                    reject(new Error(`OpenJPEG conversion failed: ${error.message}\n${stderr}`));
+                    const errorMsg = converter.utility === 'magick' ? 'ImageMagick conversion failed' : 'OpenJPEG conversion failed';
+                    reject(new Error(`${errorMsg}: ${error.message}\n${stderr}`));
                     return;
                 }
 
                 // Only log stderr if it contains actual error content
                 if (stderr && stderr.trim() !== '') {
-                    console.error('OpenJPEG stderr:', stderr);
+                    console.error(`${converter.utility} stderr:`, stderr);
                 }
 
-                resolve();
+                // Verify the output file exists and has content
+                try {
+                    const exists = await fs.access(normalizedOutputPath)
+                        .then(() => true)
+                        .catch(() => false);
+
+                    if (!exists) {
+                        reject(new Error(`Output file not created at ${normalizedOutputPath}`));
+                        return;
+                    }
+
+                    const stats = await fs.stat(normalizedOutputPath);
+                    if (stats.size === 0) {
+                        reject(new Error('Output file was created but is empty'));
+                        return;
+                    }
+
+                    resolve();
+                } catch (error: unknown) {
+                    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+                    reject(new Error(`Failed to verify output file: ${errorMessage}`));
+                }
             });
         });
     }
@@ -233,15 +386,10 @@ export class DICOMService {
 
             const transferSyntax = dicomData.string(DicomTags.TransferSyntaxUID);
 
-            const dicomWindowCenter = dicomData.floatString(DicomTags.WindowCenter) || undefined;
-            const dicomWindowWidth = dicomData.floatString(DicomTags.WindowWidth) || undefined;
-            const rescaleSlope = dicomData.floatString(DicomTags.RescaleSlope) || 1;
-            const rescaleIntercept = dicomData.floatString(DicomTags.RescaleIntercept) || 0;
-
             // Create a typed array directly from the buffer with proper offset handling
             const dataView = new DataView(pixelData.buffer, pixelData.byteOffset, pixelData.length);
             const pixelCount = rows * columns;
-            const pixels = new Int16Array(pixelCount); // Always create a new array for consistent handling
+            const pixels = new Int16Array(pixelCount);
 
             // Read pixels with proper endianness handling
             const littleEndian = transferSyntax !== '1.2.840.10008.1.2.2'; // Everything except Explicit VR Big Endian
@@ -249,32 +397,52 @@ export class DICOMService {
                 pixels[i] = dataView.getInt16(i * 2, littleEndian);
             }
 
-            // Calculate window settings if not provided
-            let windowCenter = dicomWindowCenter;
-            let windowWidth = dicomWindowWidth;
+            // Apply rescale slope and intercept
+            const rescaleSlope = dicomData.floatString(DicomTags.RescaleSlope) || 1;
+            const rescaleIntercept = dicomData.floatString(DicomTags.RescaleIntercept) || 0;
 
-            if (!windowCenter || !windowWidth) {
-                // Auto window by scanning min/max values
-                let min = Number.MAX_VALUE;
-                let max = Number.MIN_VALUE;
-                for (let i = 0; i < pixels.length; i++) {
-                    const value = pixels[i] * rescaleSlope + rescaleIntercept;
-                    min = Math.min(min, value);
-                    max = Math.max(max, value);
-                }
-                windowCenter = (max + min) / 2;
-                windowWidth = max - min;
+            // Convert to floating point values
+            const values = new Float32Array(pixelCount);
+            let min = Number.MAX_VALUE;
+            let max = Number.MIN_VALUE;
+
+            for (let i = 0; i < pixelCount; i++) {
+                const value = pixels[i] * rescaleSlope + rescaleIntercept;
+                values[i] = value;
+                min = Math.min(min, value);
+                max = Math.max(max, value);
             }
 
-            // Convert 16-bit to 8-bit using window/level
-            const lowValue = windowCenter - (windowWidth / 2);
-            const highValue = windowCenter + (windowWidth / 2);
+            // Create histogram
+            const histogramBins = 256;
+            const histogram = new Uint32Array(histogramBins);
+            const range = max - min;
 
-            // Create PNG header (IHDR chunk)
+            for (let i = 0; i < pixelCount; i++) {
+                const bin = Math.min(
+                    histogramBins - 1,
+                    Math.max(0, Math.floor((values[i] - min) * (histogramBins - 1) / range))
+                );
+                histogram[bin]++;
+            }
+
+            // Calculate cumulative histogram
+            const cdf = new Float32Array(histogramBins);
+            cdf[0] = histogram[0];
+            for (let i = 1; i < histogramBins; i++) {
+                cdf[i] = cdf[i - 1] + histogram[i];
+            }
+
+            // Normalize CDF to [0,1]
+            for (let i = 0; i < histogramBins; i++) {
+                cdf[i] /= pixelCount;
+            }
+
+            // Create PNG header
             const pngSignature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
             const ihdrChunk = this.createPNGChunk('IHDR', Buffer.from([
-                ...this.toBytes(columns, 4),    // Width
-                ...this.toBytes(rows, 4),       // Height
+                ...this.toBytes(columns, 4),
+                ...this.toBytes(rows, 4),
                 8,                              // Bit depth
                 0,                              // Color type (grayscale)
                 0,                              // Compression method
@@ -282,45 +450,57 @@ export class DICOMService {
                 0                               // Interlace method
             ]));
 
-            // Create image data with proper filter type handling
-            const scanlineLength = columns + 1; // +1 for filter type byte
+            // Create image data
+            const scanlineLength = columns + 1;
             const imageData = Buffer.alloc(rows * scanlineLength);
 
-            // Fill image data with normalized pixel values
+            // Apply advanced contrast enhancement
             let pixelIndex = 0;
+            const clipLimit = 0.1; // Clip histogram at 10% of total pixels per bin
+            const maxClip = pixelCount * clipLimit / histogramBins;
+
             for (let y = 0; y < rows; y++) {
                 imageData[y * scanlineLength] = 0; // Filter type 0 (None)
                 for (let x = 0; x < columns; x++) {
-                    // Apply rescale and window/level transformation
-                    const pixelValue = pixels[pixelIndex++] * rescaleSlope + rescaleIntercept;
-                    let normalized = (pixelValue - lowValue) / (highValue - lowValue);
-                    normalized = Math.max(0, Math.min(1, normalized));
+                    const value = values[pixelIndex++];
+
+                    // Get normalized value using histogram equalization
+                    const bin = Math.min(
+                        histogramBins - 1,
+                        Math.max(0, Math.floor((value - min) * (histogramBins - 1) / range))
+                    );
+
+                    // Use CDF for intensity mapping, but apply contrast limiting
+                    let mappedValue = cdf[bin];
+
+                    // Apply non-linear contrast enhancement
+                    const contrast = 2.0; // Increase contrast
+                    mappedValue = Math.pow(mappedValue, 1 / contrast);
+
+                    // Apply brightness boost
+                    mappedValue = Math.min(1, mappedValue * 1.8); // 80% brightness boost
 
                     // Convert to 8-bit
-                    const intensity = Math.round(normalized * 255);
+                    const intensity = Math.round(mappedValue * 255);
                     imageData[y * scanlineLength + x + 1] = intensity;
                 }
             }
 
-            // Compress image data
+            // Compress and finish PNG
             const deflate = require('zlib').deflateSync;
             const compressedData = deflate(imageData);
             const idatChunk = this.createPNGChunk('IDAT', compressedData);
-
-            // Create end chunk
             const iendChunk = this.createPNGChunk('IEND', Buffer.alloc(0));
 
-            // Combine all chunks
-            const pngData = Buffer.concat([
+            const finalPngData = Buffer.concat([
                 pngSignature,
                 ihdrChunk,
                 idatChunk,
                 iendChunk
             ]);
 
-            return `data:image/png;base64,${pngData.toString('base64')}`;
+            return `data:image/png;base64,${finalPngData.toString('base64')}`;
         } catch (error) {
-            console.error('Error during raw DICOM conversion:', error);
             throw error;
         }
     }
@@ -395,7 +575,6 @@ export class DICOMService {
                 return await this.app.vault.readBinary(file);
             }
         } catch (error) {
-            console.error(`Error reading DICOM file: ${error}`);
             throw error;
         }
     }
@@ -446,9 +625,11 @@ export class DICOMService {
         }
 
         try {
+            console.log(`Starting GIF creation - Input path: ${imagesPath}, Output path: ${outputPath}`);
             // Get a list of PNG files in the Images folder
             const imagesFolder = this.app.vault.getAbstractFileByPath(imagesPath);
             if (!imagesFolder || !(imagesFolder instanceof TFolder)) {
+                console.error('Failed to create GIF - Images folder not found or invalid');
                 return;
             }
 
@@ -457,34 +638,64 @@ export class DICOMService {
                     file instanceof TFile && file.extension === 'png')
                 .sort((a, b) => a.name.localeCompare(b.name));
 
+            console.log(`Found ${pngFiles.length} PNG files for GIF creation`);
+
             if (pngFiles.length < this.settings.minImagesForGif) {
+                console.log(`Skipping GIF creation - Not enough images (${pngFiles.length} < ${this.settings.minImagesForGif})`);
                 return;
             }
 
             // Get the vault path for constructing absolute paths
             const vaultPath = (this.app.vault.adapter as any).basePath;
 
-            // Create the ImageMagick command with proper delay and output settings
-            const inputFiles = pngFiles.map(file =>
-                `"${path.join(vaultPath, file.path)}"`
-            ).join(' ');
-
             return new Promise((resolve, reject) => {
+                console.log('Executing ImageMagick command for GIF creation');
                 const { exec } = require('child_process');
-                const command = `"${this.settings.imagemagickPath}" -delay ${this.settings.gifFrameDelay / 10} ${inputFiles} -loop 0 "${path.join(vaultPath, outputPath)}"`;
 
-                exec(command, { windowsHide: true }, (error: any, stdout: string, stderr: string) => {
+                // Use wildcards for input and normalize paths
+                const inputPattern = path.join(vaultPath, imagesPath, '*.png').replace(/\\/g, '/');
+                const absoluteOutputPath = path.join(vaultPath, outputPath).replace(/\\/g, '/');
+
+                // ImageMagick command with wildcard pattern
+                const command = `"${this.settings.imagemagickPath}" -delay ${this.settings.gifFrameDelay / 10} "${inputPattern}" -loop 0 "${absoluteOutputPath}"`;
+
+                console.log('Debug - Command:', command);
+                exec(command, {
+                    windowsHide: true,
+                    maxBuffer: 1024 * 1024 * 100,
+                    env: {
+                        ...process.env,
+                        MAGICK_CONFIGURE_PATH: path.dirname(this.settings.imagemagickPath)
+                    }
+                }, (error: any, stdout: string, stderr: string) => {
                     if (error) {
-                        console.error('ImageMagick error:', stderr);
+                        console.error(`GIF creation failed - ImageMagick error: ${error.message}`);
+                        if (stderr) console.error(`ImageMagick stderr: ${stderr}`);
                         reject(new Error(`Failed to create animated GIF: ${error.message}`));
                         return;
                     }
+                    console.log('GIF creation completed successfully');
                     resolve();
                 });
             });
         } catch (error) {
-            console.error('Error creating animated GIF:', error);
+            console.error(`GIF creation failed - Unexpected error: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
+    }
+
+    // Add helper method for path shortening
+    private shortenPath(longPath: string): string {
+        const ext = path.extname(longPath);
+        const dir = path.dirname(longPath);
+        const base = path.basename(longPath, ext);
+
+        // If path is too long, truncate the basename while preserving extension
+        if (longPath.length >= 260) {
+            const maxBaseLength = 260 - (dir.length + ext.length + 1);
+            const shortenedBase = base.substring(0, maxBaseLength - 1);
+            return path.join(dir, shortenedBase + ext);
+        }
+        return longPath;
     }
 }
