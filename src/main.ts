@@ -5,6 +5,7 @@ import { FileService } from './services/file-service';
 import { ViewerService } from './services/viewer-service';
 import { DicomTags } from './models/dicom-tags';
 import { DicomModalities } from './models/dicom-modalities';
+import { ImportModal } from './ui/import-modal';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import dicomParser from 'dicom-parser';
@@ -43,7 +44,7 @@ export default class DICOMHandlerPlugin extends Plugin {
         this.addCommand({
             id: 'import-folder',
             name: 'Import All DICOM Files in Folder',
-            callback: async () => {
+            callback: () => {
                 if (!this.settings.sourceFolderPath) {
                     new Notice('Please configure the source folder in settings');
                     return;
@@ -52,10 +53,7 @@ export default class DICOMHandlerPlugin extends Plugin {
                     new Notice('Please configure the destination folder in settings');
                     return;
                 }
-                await this.convertFolder(
-                    this.settings.sourceFolderPath,
-                    this.settings.destinationFolderPath
-                );
+                new ImportModal(this).open();
             }
         });
     }
@@ -506,7 +504,8 @@ export default class DICOMHandlerPlugin extends Plugin {
         }
     }
 
-    async convertFolder(sourceFolderPath: string, destinationFolderPath: string) {
+    async convertFolder(sourceFolderPath: string, destinationFolderPath: string,
+        onProgress?: (progress: { percentage: number, message: string }) => void) {
         try {
             // Validate OpenJPEG settings
             if (!this.settings.opjPath) {
@@ -530,6 +529,8 @@ export default class DICOMHandlerPlugin extends Plugin {
             // Ensure destination folder exists
             await this.ensureFolderPath(destinationFolderPath);
 
+            onProgress?.({ percentage: 10, message: 'Scanning for DICOM files...' });
+
             // Recursively find all DICOM files in source folder and subfolders
             const dicomFiles = await this.findDicomFilesRecursively(sourceFolderPath);
 
@@ -537,8 +538,7 @@ export default class DICOMHandlerPlugin extends Plugin {
                 const methodDesc = this.settings.dicomIdentification === 'extension'
                     ? `files with .${this.settings.dicomExtension} extension`
                     : 'files without extension';
-                new Notice(`No DICOM files found (looking for ${methodDesc})`);
-                return;
+                throw new Error(`No DICOM files found (looking for ${methodDesc})`);
             }
 
             let converted = 0;
@@ -551,8 +551,7 @@ export default class DICOMHandlerPlugin extends Plugin {
                 isReport: boolean
             }>();
 
-            // Show initial notice
-            new Notice(`Starting import of ${totalFiles} DICOM files...`);
+            onProgress?.({ percentage: 20, message: `Found ${totalFiles} DICOM files to import` });
 
             for (const filePath of dicomFiles) {
                 try {
@@ -613,31 +612,33 @@ export default class DICOMHandlerPlugin extends Plugin {
 
                     converted++;
 
-                    // Show progress
-                    if (converted % Math.max(10, Math.round(totalFiles / 10)) === 0) {
-                        new Notice(`Importing DICOM files... ${converted}/${totalFiles}`);
-                    }
+                    // Update progress
+                    const percentage = Math.min(90, 20 + Math.round((converted / totalFiles) * 70));
+                    onProgress?.({
+                        percentage,
+                        message: `Processing file ${converted} of ${totalFiles}: ${path.basename(filePath)}`
+                    });
 
                 } catch (error) {
                     console.error(`Error importing ${path.basename(filePath)}:`, error);
-                    if (error instanceof Error) {
-                        new Notice(`Error importing ${path.basename(filePath)}: ${error.message}`);
-                    }
+                    throw error;
                 }
             }
+
+            onProgress?.({ percentage: 95, message: 'Creating metadata notes...' });
 
             // Create metadata notes for each series after all files are converted
             for (const { dicomData, folderPath, isReport } of seriesMap.values()) {
                 await this.createMetadataNote(dicomData, folderPath);
             }
 
-            new Notice(`Successfully imported ${converted} of ${totalFiles} DICOM files to ${destinationFolderPath}`);
+            onProgress?.({ percentage: 100, message: `Successfully imported ${converted} of ${totalFiles} DICOM files` });
 
         } catch (error) {
             if (error instanceof Error) {
-                new Notice(`Error accessing folders: ${error.message}`);
+                throw new Error(`Error importing files: ${error.message}`);
             } else {
-                new Notice('Error accessing folders');
+                throw new Error('Error importing files');
             }
         }
     }

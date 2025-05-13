@@ -21,3 +21,10 @@ export interface PluginSettings {
     enableAutoLoad: boolean;
     defaultViewer: string; // e.g., 'image', '3D'
 }
+
+// Define type for progress updates
+export interface Progress {
+    percentage: number;
+    message: string;
+    phase?: 'analyzing' | 'importing' | 'creating-folders' | 'processing-files' | 'creating-metadata';
+}

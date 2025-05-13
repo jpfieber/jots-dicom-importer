@@ -97,8 +97,6 @@ export class DICOMService {
     async convertToImage(file: TFile, targetPath?: string): Promise<string> {
         const tempFiles: string[] = [];
         try {
-            new Notice(`Processing DICOM file: ${file.path}`);
-
             if (!this.settings.opjPath) {
                 throw new Error('OpenJPEG path is not configured');
             }
@@ -179,7 +177,6 @@ export class DICOMService {
 
                     // Save the PNG file
                     await this.app.vault.createBinary(targetPath, binaryData);
-                    new Notice(`Successfully saved PNG file: ${path.basename(targetPath)}`);
                 }
 
                 return result;
