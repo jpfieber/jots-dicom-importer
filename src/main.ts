@@ -228,21 +228,37 @@ export default class DICOMHandlerPlugin extends Plugin {
                 const studyDate = dicomData.string(DicomTags.StudyDate);
                 const organizedPath = this.getOrganizedFolderPath(basePath, dicomData);
                 await this.ensureFolder(organizedPath);
-                await this.createMetadataNote(dicomData, organizedPath);
+
+                // Check if metadata note already exists
+                const folderName = organizedPath.split('/').pop() || 'series';
+                const sanitizedFolderName = folderName.replace(/^\d{8}\s*-\s*/, '');
+                const notePath = path.join(
+                    organizedPath,
+                    `${studyDate ? studyDate + ' - ' : ''}${sanitizedFolderName}.md`
+                ).replace(/\\/g, '/');
+
+                const noteExists = await this.app.vault.adapter.exists(notePath);
+                if (!noteExists) {
+                    await this.createMetadataNote(dicomData, organizedPath);
+                }
 
                 // Archive original DICOM file if enabled
                 if (this.settings.archiveDicomFiles) {
                     const dicomPath = path.join(organizedPath, 'DICOM').replace(/\\/g, '/');
                     await this.ensureFolder(dicomPath);
                     const dicomFilePath = path.join(dicomPath, file.name).replace(/\\/g, '/');
-                    await this.app.vault.createBinary(dicomFilePath, Buffer.from(arrayBuffer));
+
+                    // Check if DICOM file already exists
+                    const dicomExists = await this.app.vault.adapter.exists(dicomFilePath);
+                    if (!dicomExists) {
+                        await this.app.vault.createBinary(dicomFilePath, Buffer.from(arrayBuffer));
+                    }
                 }
                 return;
             }
 
             // Handle regular image-containing DICOM files
             const imageData = await this.dicomService.convertToImage(file);
-
             const imagesPath = path.join(basePath, 'Images').replace(/\\/g, '/');
 
             // Ensure the Images folder and all parent folders exist
@@ -252,28 +268,36 @@ export default class DICOMHandlerPlugin extends Plugin {
             const newFileName = `${file.basename}.png`;
             const newPath = path.join(imagesPath, newFileName).replace(/\\/g, '/');
 
-            // Convert base64 to binary
-            const base64Data = imageData.replace(new RegExp(`^data:image/${this.settings.imageFormat};base64,`), '');
-            const binaryData = Buffer.from(base64Data, 'base64');
+            // Check if image already exists
+            const imageExists = await this.app.vault.adapter.exists(newPath);
+            if (!imageExists) {
+                // Convert base64 to binary
+                const base64Data = imageData.replace(new RegExp(`^data:image/${this.settings.imageFormat};base64,`), '');
+                const binaryData = Buffer.from(base64Data, 'base64');
 
-            // Save the PNG image
-            await this.app.vault.createBinary(newPath, binaryData);
+                // Save the PNG image
+                await this.app.vault.createBinary(newPath, binaryData);
+            }
 
             // Archive original DICOM file if enabled
             if (this.settings.archiveDicomFiles) {
                 const dicomPath = path.join(basePath, 'DICOM').replace(/\\/g, '/');
+
                 await this.ensureFolder(dicomPath);
 
                 // Copy the original DICOM file with original name
                 const dicomFilePath = path.join(dicomPath, file.name).replace(/\\/g, '/');
-                await this.app.vault.createBinary(dicomFilePath, Buffer.from(arrayBuffer));
+
+                // Check if DICOM file already exists
+                const dicomExists = await this.app.vault.adapter.exists(dicomFilePath);
+                if (!dicomExists) {
+                    await this.app.vault.createBinary(dicomFilePath, Buffer.from(arrayBuffer));
+                }
             }
 
         } catch (error) {
-            if (error instanceof Error) {
+            if (error instanceof Error && !(error.message.includes('already exists'))) {
                 console.error(`Failed to convert DICOM: ${error.message}`);
-            } else {
-                console.error('Failed to convert DICOM: Unknown error');
             }
             throw error;
         }
