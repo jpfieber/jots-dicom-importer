@@ -311,8 +311,6 @@ export class DICOMService {
             // Build the ImageMagick command with options
             const command = `"${this.settings.magickPath}" "${inputPath}" ${options.join(' ')} "${outputPath}"`;
 
-            console.log('Debug - ImageMagick command:', command);
-
             exec(command, { windowsHide: true }, async (error: any, stdout: string, stderr: string) => {
                 if (error) {
                     reject(new Error(`ImageMagick conversion failed: ${error.message}\n${stderr}`));
@@ -653,7 +651,6 @@ export class DICOMService {
         }
 
         try {
-            console.log(`Starting GIF creation - Input path: ${imagesPath}, Output path: ${outputPath}`);
             // Get a list of PNG files in the Images folder
             const imagesFolder = this.app.vault.getAbstractFileByPath(imagesPath);
             if (!imagesFolder || !(imagesFolder instanceof TFolder)) {
@@ -666,10 +663,7 @@ export class DICOMService {
                     file instanceof TFile && file.extension === 'png')
                 .sort((a, b) => a.name.localeCompare(b.name));
 
-            console.log(`Found ${pngFiles.length} PNG files for GIF creation`);
-
             if (pngFiles.length < this.settings.minImagesForGif) {
-                console.log(`Skipping GIF creation - Not enough images (${pngFiles.length} < ${this.settings.minImagesForGif})`);
                 return;
             }
 
@@ -677,7 +671,6 @@ export class DICOMService {
             const vaultPath = (this.app.vault.adapter as any).basePath;
 
             return new Promise((resolve, reject) => {
-                console.log('Executing ImageMagick command for GIF creation');
                 const { exec } = require('child_process');
 
                 // Use wildcards for input and normalize paths
@@ -687,7 +680,6 @@ export class DICOMService {
                 // ImageMagick command with wildcard pattern
                 const command = `"${this.settings.imagemagickPath}" -delay ${this.settings.gifFrameDelay / 10} "${inputPattern}" -loop 0 "${absoluteOutputPath}"`;
 
-                console.log('Debug - Command:', command);
                 exec(command, {
                     windowsHide: true,
                     maxBuffer: 1024 * 1024 * 100,
@@ -702,7 +694,6 @@ export class DICOMService {
                         reject(new Error(`Failed to create animated GIF: ${error.message}`));
                         return;
                     }
-                    console.log('GIF creation completed successfully');
                     resolve();
                 });
             });

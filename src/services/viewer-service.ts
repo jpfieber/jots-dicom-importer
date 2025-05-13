@@ -1,6 +1,7 @@
 import { App, WorkspaceLeaf, TFile, Notice, TFolder } from 'obsidian';
 import { DICOMService } from './dicom-service';
 import { Progress } from '../models/types';
+import * as path from 'path';
 
 type ProgressCallback = (progress: Progress) => void;
 
@@ -12,8 +13,10 @@ interface SeriesInfo {
 export class ViewerService {
     private container: HTMLElement | null = null;
     private dicomService: DICOMService;
+    private app: App;
 
     constructor(app: App, dicomService: DICOMService) {
+        this.app = app;
         this.dicomService = dicomService;
     }
 
@@ -49,7 +52,6 @@ export class ViewerService {
 
                     await this.dicomService.createAnimatedGif(imagesPath, gifPath)
                         .catch((error: Error) => {
-                            console.error(`Failed to create GIF for series ${seriesFolder}: ${error.message}`);
                             new Notice(`Warning: Could not create GIF for series ${seriesFolder}`, 5000);
                             // Continue processing other series
                         });
@@ -65,5 +67,28 @@ export class ViewerService {
         // Create metadata notes
         onProgress?.({ percentage: 95, message: 'Creating metadata notes...' });
         // ...rest of existing code...
+    }
+
+    private async updateGif(seriesPath: string): Promise<void> {
+        try {
+            // Remove any existing series-level GIF first
+            const seriesName = seriesPath.split('/').pop() || 'series';
+            const gifPath = path.join(seriesPath, `${seriesName}.gif`).replace(/\\/g, '/');
+            const gifFile = this.app.vault.getAbstractFileByPath(gifPath);
+            if (gifFile instanceof TFile) {
+                await this.app.vault.delete(gifFile);
+            }
+
+            // Create new GIF
+            const imagesPath = path.join(seriesPath, 'Images').replace(/\\/g, '/');
+            try {
+                await this.dicomService.createAnimatedGif(imagesPath, gifPath);
+            } catch (error: any) {
+                console.error(`Failed to create GIF for series ${seriesPath}: ${error.message}`);
+            }
+
+        } catch (error: any) {
+            console.error(`Error creating GIF: ${error.message}`);
+        }
     }
 }

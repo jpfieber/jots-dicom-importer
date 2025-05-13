@@ -401,7 +401,6 @@ export default class DICOMHandlerPlugin extends Plugin {
                                     // Skip adding raw HL7 to metadata
                                     continue;
                                 } catch (e) {
-                                    console.error('Failed to parse HL7 content:', e);
                                     // If HL7 parsing fails, fall back to regular handling
                                 }
                             }
@@ -673,37 +672,84 @@ export default class DICOMHandlerPlugin extends Plugin {
             const seriesMap = new Map<string, {
                 dicomData: dicomParser.DataSet,
                 folderPath: string,
-                isReport: boolean
+                isReport: boolean,
+                isNew: boolean // Track if this is a new series
             }>();
 
             // Track studies by StudyInstanceUID
             const studyMap = new Map<string, {
                 dicomData: dicomParser.DataSet,
-                seriesPaths: Set<string>
+                seriesPaths: Set<string>,
+                hasNewSeries: boolean // Track if study has any new series
             }>();
 
             onProgress?.({ percentage: 20, message: `Found ${totalFiles} DICOM files to import` });
 
+            // First pass - analyze files and check for existing series
             for (const filePath of dicomFiles) {
+                // Read the file from external folder
+                const fileBuffer = await fs.readFile(filePath);
+                const fileName = path.basename(filePath);
+
+                // Parse DICOM data
+                const arrayBuffer = new Uint8Array(fileBuffer).buffer;
+                const dicomData = this.dicomService.parseDicomData(arrayBuffer);
+
+                // Get organized path from root destination folder
+                const organizedPath = this.getOrganizedFolderPath(destinationFolderPath, dicomData).replace(/\\/g, '/');
+
+                // Check if series markdown file exists
+                const studyDate = dicomData.string(DicomTags.StudyDate) || '';
+                const folderName = organizedPath.split('/').pop() || 'series';
+                const sanitizedFolderName = folderName.replace(/^\d{8}\s*-\s*/, '');
+                const seriesMarkdownPath = path.join(
+                    organizedPath,
+                    `${studyDate ? studyDate + ' - ' : ''}${sanitizedFolderName}.md`
+                ).replace(/\\/g, '/');
+
+                // Check if series already exists
+                const seriesExists = await this.app.vault.adapter.exists(seriesMarkdownPath);
+
+                // Store DICOM data for metadata notes
+                const seriesInstanceUID = dicomData.string(DicomTags.SeriesInstanceUID);
+                if (seriesInstanceUID && !seriesMap.has(seriesInstanceUID)) {
+                    const isReport = dicomData.string(DicomTags.SOPClassUID) === '1.2.840.10008.5.1.4.1.1.88.11' || // Basic Text SR
+                        dicomData.string(DicomTags.SOPClassUID) === '1.2.840.10008.5.1.4.1.1.88.22' || // Enhanced SR
+                        dicomData.string(DicomTags.SOPClassUID) === '1.2.840.10008.5.1.4.1.1.88.33';  // Comprehensive SR
+
+                    seriesMap.set(seriesInstanceUID, {
+                        dicomData,
+                        folderPath: organizedPath,
+                        isReport,
+                        isNew: !seriesExists
+                    });
+
+                    // Track studies and whether they have new series
+                    const studyInstanceUID = dicomData.string(DicomTags.StudyInstanceUID);
+                    if (studyInstanceUID) {
+                        if (!studyMap.has(studyInstanceUID)) {
+                            studyMap.set(studyInstanceUID, {
+                                dicomData,
+                                seriesPaths: new Set<string>(),
+                                hasNewSeries: !seriesExists
+                            });
+                        } else {
+                            // Update hasNewSeries if this series is new
+                            const study = studyMap.get(studyInstanceUID)!;
+                            study.hasNewSeries = study.hasNewSeries || !seriesExists;
+                        }
+                        studyMap.get(studyInstanceUID)?.seriesPaths.add(organizedPath);
+                    }
+                }
+
+                // Skip this file if its series already exists
+                if (seriesExists) {
+                    continue;
+                }
+
+                // Process the file only if the series doesn't exist
                 try {
-                    // Read the file from external folder
-                    const fileBuffer = await fs.readFile(filePath);
-                    const fileName = path.basename(filePath);
-
-                    // Parse DICOM data
-                    const arrayBuffer = new Uint8Array(fileBuffer).buffer;
-                    const dicomData = this.dicomService.parseDicomData(arrayBuffer);
-
-                    // Check if this is a Structured Report
-                    const sopClassUID = dicomData.string(DicomTags.SOPClassUID);
-                    const isStructuredReport = sopClassUID === '1.2.840.10008.5.1.4.1.1.88.11' || // Basic Text SR
-                        sopClassUID === '1.2.840.10008.5.1.4.1.1.88.22' || // Enhanced SR
-                        sopClassUID === '1.2.840.10008.5.1.4.1.1.88.33';  // Comprehensive SR
-
-                    // Get organized path from root destination folder
-                    const organizedPath = this.getOrganizedFolderPath(destinationFolderPath, dicomData).replace(/\\/g, '/');
-
-                    if (!isStructuredReport) {
+                    if (!dicomData.string(DicomTags.SOPClassUID)?.includes('1.2.840.10008.5.1.4.1.1.88')) {
                         // For image files, create Images folder and attempt conversion
                         const imagesPath = `${organizedPath}/Images`;
                         await this.ensureFolderPath(imagesPath);
@@ -735,28 +781,6 @@ export default class DICOMHandlerPlugin extends Plugin {
                         );
                     }
 
-                    // Store DICOM data for metadata notes
-                    const seriesInstanceUID = dicomData.string(DicomTags.SeriesInstanceUID);
-                    if (seriesInstanceUID && !seriesMap.has(seriesInstanceUID)) {
-                        seriesMap.set(seriesInstanceUID, {
-                            dicomData,
-                            folderPath: organizedPath,
-                            isReport: isStructuredReport
-                        });
-                    }
-
-                    // Track studies
-                    const studyInstanceUID = dicomData.string(DicomTags.StudyInstanceUID);
-                    if (studyInstanceUID) {
-                        if (!studyMap.has(studyInstanceUID)) {
-                            studyMap.set(studyInstanceUID, {
-                                dicomData,
-                                seriesPaths: new Set<string>()
-                            });
-                        }
-                        studyMap.get(studyInstanceUID)?.seriesPaths.add(organizedPath);
-                    }
-
                     converted++;
 
                     // Update progress
@@ -765,7 +789,6 @@ export default class DICOMHandlerPlugin extends Plugin {
                         percentage,
                         message: `Processing file ${converted} of ${totalFiles}: ${path.basename(filePath)}`
                     });
-
                 } catch (error) {
                     console.error(`Error importing ${path.basename(filePath)}:`, error);
                     throw error;
@@ -774,9 +797,9 @@ export default class DICOMHandlerPlugin extends Plugin {
 
             onProgress?.({ percentage: 90, message: 'Creating animated GIFs...' });
 
-            // Create animated GIFs for each series before creating metadata notes
-            for (const { folderPath, isReport } of seriesMap.values()) {
-                if (!isReport) {
+            // Create animated GIFs only for new series
+            for (const { folderPath, isReport, isNew } of seriesMap.values()) {
+                if (!isReport && isNew) {
                     // Get the series name from the folder path for the GIF name
                     const seriesFolder = folderPath.split('/').pop() || 'series';
                     const gifPath = `${folderPath}/${seriesFolder}.gif`;
@@ -784,30 +807,38 @@ export default class DICOMHandlerPlugin extends Plugin {
                     try {
                         await this.dicomService.createAnimatedGif(imagesPath, gifPath);
                     } catch (error) {
-                        console.error(`Failed to create GIF for series ${seriesFolder}: ${error instanceof Error ? error.message : 'Unknown error'}`);
-                        // Continue with other series rather than failing the whole process
+                        if (error instanceof Error) {
+                            console.error(`Failed to create GIF for series ${seriesFolder}: ${error.message}`);
+                        } else {
+                            console.error(`Failed to create GIF for series ${seriesFolder}: Unknown error`);
+                        }
                     }
                 }
             }
 
             onProgress?.({ percentage: 95, message: 'Creating metadata notes...' });
 
-            // Create metadata notes for each series after all files are converted
-            for (const { dicomData, folderPath, isReport } of seriesMap.values()) {
-                await this.createMetadataNote(dicomData, folderPath);
+            // Create metadata notes only for new series
+            for (const { dicomData, folderPath, isNew } of seriesMap.values()) {
+                if (isNew) {
+                    await this.createMetadataNote(dicomData, folderPath);
+                }
             }
 
-            // After processing all files, create study metadata notes
+            // After processing all files, create/update study metadata notes only for studies with new series
             onProgress?.({ percentage: 97, message: 'Creating study metadata notes...' });
 
             for (const [studyUID, studyData] of studyMap.entries()) {
-                await this.createStudyMetadataNote(studyUID, {
-                    dicomData: studyData.dicomData,
-                    seriesPaths: Array.from(studyData.seriesPaths)
-                });
+                if (studyData.hasNewSeries) {
+                    await this.createStudyMetadataNote(studyUID, {
+                        dicomData: studyData.dicomData,
+                        seriesPaths: Array.from(studyData.seriesPaths)
+                    });
+                }
             }
 
-            onProgress?.({ percentage: 100, message: `Successfully imported ${converted} of ${totalFiles} DICOM files` });
+            const newSeriesCount = Array.from(seriesMap.values()).filter(s => s.isNew).length;
+            onProgress?.({ percentage: 100, message: `Successfully imported ${newSeriesCount} new series` });
 
         } catch (error) {
             if (error instanceof Error) {
