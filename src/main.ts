@@ -565,6 +565,70 @@ export default class DICOMHandlerPlugin extends Plugin {
         }
     }
 
+    private async createStudyMetadataNote(studyInstanceUID: string, studyData: {
+        dicomData: dicomParser.DataSet,
+        seriesPaths: string[]
+    }): Promise<void> {
+        try {
+            const dicomData = studyData.dicomData;
+            const seriesPaths = studyData.seriesPaths;
+
+            // Get study folder path from first series path
+            const studyPath = path.dirname(seriesPaths[0]);
+
+            // Create YAML frontmatter
+            let content = '---\n';
+            content += `study_instance_uid: "${studyInstanceUID}"\n`;
+            if (dicomData.string(DicomTags.StudyDate)) content += `study_date: "${dicomData.string(DicomTags.StudyDate)}"\n`;
+            if (dicomData.string(DicomTags.StudyDescription)) content += `study_description: "${dicomData.string(DicomTags.StudyDescription)}"\n`;
+            const patientNameStr = dicomData.string(DicomTags.PatientName);
+            if (patientNameStr) content += `patient_name: "${this.formatName(patientNameStr)}"\n`;
+            if (dicomData.string(DicomTags.PatientID)) content += `patient_id: "${dicomData.string(DicomTags.PatientID)}"\n`;
+            if (dicomData.string(DicomTags.AccessionNumber)) content += `accession_number: "${dicomData.string(DicomTags.AccessionNumber)}"\n`;
+            content += '---\n\n';
+
+            // Add title
+            const studyDate = dicomData.string(DicomTags.StudyDate) || '';
+            const studyDesc = dicomData.string(DicomTags.StudyDescription) || 'Study';
+            content += `# ${studyDate} - ${studyDesc}\n\n`;
+
+            // Add patient information section
+            content += '## Patient Information\n\n';
+            const patientName = dicomData.string(DicomTags.PatientName);
+            if (patientName) content += `**Patient Name:** ${this.formatName(patientName)}\n`;
+            if (dicomData.string(DicomTags.InstitutionName)) content += `**Imaging Site:** ${dicomData.string(DicomTags.InstitutionName)}\n`;
+            const studyPhysician = dicomData.string(DicomTags.StudyPhysician);
+            if (studyPhysician && this.isLikelyName(studyPhysician)) {
+                content += `**Study Physician:** ${this.formatName(studyPhysician)}\n`;
+            }
+            content += '\n';
+
+            // Add series list section with links
+            content += '## Series\n\n';
+            for (const seriesPath of seriesPaths) {
+                // Get the series markdown file
+                const seriesFiles = (await this.app.vault.adapter.list(seriesPath))
+                    .files.filter(f => f.endsWith('.md'));
+
+                for (const seriesFile of seriesFiles) {
+                    // Get relative path for the link
+                    const relPath = path.relative(studyPath, seriesFile).replace(/\\/g, '/');
+                    // Add link to the series note
+                    content += `- [[${relPath}|${path.basename(seriesFile, '.md')}]]\n`;
+                }
+            }
+
+            // Create the study markdown file
+            const studyFileName = `${studyDate} - Study.md`;
+            const studyFilePath = path.join(studyPath, studyFileName).replace(/\\/g, '/');
+            await this.app.vault.create(studyFilePath, content);
+
+        } catch (error) {
+            console.error('Error creating study metadata note:', error);
+            throw error;
+        }
+    }
+
     async convertFolder(sourceFolderPath: string, destinationFolderPath: string,
         onProgress?: (progress: { percentage: number, message: string }) => void) {
         try {
@@ -610,6 +674,12 @@ export default class DICOMHandlerPlugin extends Plugin {
                 dicomData: dicomParser.DataSet,
                 folderPath: string,
                 isReport: boolean
+            }>();
+
+            // Track studies by StudyInstanceUID
+            const studyMap = new Map<string, {
+                dicomData: dicomParser.DataSet,
+                seriesPaths: Set<string>
             }>();
 
             onProgress?.({ percentage: 20, message: `Found ${totalFiles} DICOM files to import` });
@@ -675,6 +745,18 @@ export default class DICOMHandlerPlugin extends Plugin {
                         });
                     }
 
+                    // Track studies
+                    const studyInstanceUID = dicomData.string(DicomTags.StudyInstanceUID);
+                    if (studyInstanceUID) {
+                        if (!studyMap.has(studyInstanceUID)) {
+                            studyMap.set(studyInstanceUID, {
+                                dicomData,
+                                seriesPaths: new Set<string>()
+                            });
+                        }
+                        studyMap.get(studyInstanceUID)?.seriesPaths.add(organizedPath);
+                    }
+
                     converted++;
 
                     // Update progress
@@ -713,6 +795,16 @@ export default class DICOMHandlerPlugin extends Plugin {
             // Create metadata notes for each series after all files are converted
             for (const { dicomData, folderPath, isReport } of seriesMap.values()) {
                 await this.createMetadataNote(dicomData, folderPath);
+            }
+
+            // After processing all files, create study metadata notes
+            onProgress?.({ percentage: 97, message: 'Creating study metadata notes...' });
+
+            for (const [studyUID, studyData] of studyMap.entries()) {
+                await this.createStudyMetadataNote(studyUID, {
+                    dicomData: studyData.dicomData,
+                    seriesPaths: Array.from(studyData.seriesPaths)
+                });
             }
 
             onProgress?.({ percentage: 100, message: `Successfully imported ${converted} of ${totalFiles} DICOM files` });
