@@ -89,9 +89,11 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.dicomIdentification = value as 'extension' | 'noExtension';
                     await this.plugin.saveSettings();
+                    // Refresh the display to update dependent settings
+                    this.display();
                 }));
 
-        new Setting(containerEl)
+        const dicomExtensionSetting = new Setting(containerEl)
             .setName('DICOM Extension')
             .setDesc('File extension to identify DICOM files (when using extension method)')
             .addText(text => text
@@ -100,9 +102,12 @@ export class DICOMHandlerSettingsTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.dicomExtension = value;
                     await this.plugin.saveSettings();
-                }))
-            .setDisabled(this.plugin.settings.dicomIdentification === 'noExtension');
+                }));
 
+        // Set disabled state based on current identification method
+        if (this.plugin.settings.dicomIdentification === 'noExtension') {
+            dicomExtensionSetting.setDisabled(true);
+        }
 
         // Folder Settings
         containerEl.createEl('h2', { text: 'Folder Settings' });

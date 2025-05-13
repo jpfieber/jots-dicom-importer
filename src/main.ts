@@ -335,11 +335,32 @@ export default class DICOMHandlerPlugin extends Plugin {
             const elements = dataset.elements;
             const metadata: Record<string, any> = {};
 
+            // Define tags to skip (binary data, pixel data, and large elements)
+            const tagsToSkip = new Set([
+                DicomTags.PixelData,                   // Skip pixel data
+                'x7fe00010',                          // Alternative pixel data tag
+                'x00880200',                          // Icon Image Sequence
+                'x00880904',                          // Topic Title
+                'x00880906',                          // Topic Subject
+                'x00880910',                          // Topic Author
+                'x00880912',                          // Topic Keywords
+            ]);
+
             // Process all DICOM elements
             for (const tag in elements) {
                 try {
+                    // Skip known binary/large data tags
+                    if (tagsToSkip.has(tag)) {
+                        continue;
+                    }
+
                     const element = elements[tag];
                     if (element) {
+                        // Skip elements that are too large (likely binary data)
+                        if (element.length > 128) {
+                            continue;
+                        }
+
                         let value;
                         if (element.vr === 'DS' || element.vr === 'FL' || element.vr === 'FD') {
                             value = dataset.floatString(tag);
@@ -349,8 +370,15 @@ export default class DICOMHandlerPlugin extends Plugin {
                             }
                         } else if (element.vr === 'IS' || element.vr === 'SL' || element.vr === 'SS' || element.vr === 'UL' || element.vr === 'US') {
                             value = dataset.uint16(tag);
+                        } else if (element.vr === 'OB' || element.vr === 'OW' || element.vr === 'UN') {
+                            // Skip binary data value representations
+                            continue;
                         } else {
                             value = dataset.string(tag);
+                            // Skip values that look like binary data
+                            if (this.looksLikeBinaryData(value)) {
+                                continue;
+                            }
                         }
 
                         if (value !== undefined && value !== null && value !== '') {
@@ -708,6 +736,32 @@ export default class DICOMHandlerPlugin extends Plugin {
         }
 
         return dicomFiles;
+    }
+
+    private looksLikeBinaryData(str: string | undefined): boolean {
+        if (!str) return false;
+
+        // Check for high percentage of non-printable characters
+        let nonPrintable = 0;
+        for (let i = 0; i < str.length; i++) {
+            const code = str.charCodeAt(i);
+            // Count characters outside normal printable range
+            if (code < 32 || (code > 126 && code < 160)) {
+                nonPrintable++;
+            }
+        }
+
+        // If more than 15% of characters are non-printable, consider it binary
+        if (nonPrintable / str.length > 0.15) {
+            return true;
+        }
+
+        // Check for very long strings without spaces (likely compressed/binary data)
+        if (str.length > 100 && !str.includes(' ')) {
+            return true;
+        }
+
+        return false;
     }
 
     async loadSettings() {
