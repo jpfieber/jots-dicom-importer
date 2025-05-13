@@ -371,7 +371,7 @@ export class DICOMService {
                 }
 
                 // Filter out known non-error messages from stderr
-                if (stderr && stderr.trim() !== '' && 
+                if (stderr && stderr.trim() !== '' &&
                     !stderr.includes('WARNING -> [PGM file] Only the first component') &&
                     !stderr.includes('is written to the file')) {
                     console.error(`${converter.utility} stderr:`, stderr);
