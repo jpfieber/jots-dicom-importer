@@ -87,9 +87,9 @@ export class DICOMService {
 
             const itemLength =
                 byteArray[position + 4] |
-                (byteArray[position + 5] << 8) |
-                (byteArray[position + 6] << 16) |
-                (byteArray[position + 7] << 24);
+                byteArray[position + 5] << 8 |
+                byteArray[position + 6] << 16 |
+                byteArray[position + 7] << 24;
 
             position += 8;
 
@@ -131,6 +131,19 @@ export class DICOMService {
         throw new Error('Could not find valid JPEG Lossless frame in DICOM data');
     }
 
+    // Add this helper method to normalize filenames
+    public normalizeFileName(originalName: string): string {
+        // Extract all numbers from filename
+        const numbers = originalName.match(/\d+/g);
+        if (!numbers) return originalName;
+        
+        // Get the last number in the sequence, which is typically the slice number
+        const number = numbers[numbers.length - 1];
+        
+        // Pad the number to 4 digits
+        return number.padStart(4, '0');
+    }
+
     async convertToImage(file: TFile, targetPath?: string): Promise<string> {
         const tempFiles: string[] = [];
         let result: string | undefined;
@@ -143,6 +156,15 @@ export class DICOMService {
 
             const arrayBuffer = await this.loadDICOMFile(file);
             const dicomData = this.parseDicomData(arrayBuffer);
+
+            // Normalize the filename
+            const normalizedNumber = this.normalizeFileName(file.basename);
+            
+            // Update target path with normalized number
+            if (targetPath) {
+                const targetDir = path.dirname(targetPath);
+                targetPath = path.join(targetDir, `${normalizedNumber}.png`);
+            }
 
             // Get and store transfer syntax before extracting pixel data
             this.lastTransferSyntax = dicomData.string(DicomTags.TransferSyntaxUID) || 'default';
@@ -213,17 +235,23 @@ export class DICOMService {
 
             if (windowCenter !== undefined && windowWidth !== undefined) {
                 // Use DICOM window/level settings if available
-                options.push('-level', `${windowCenter - windowWidth / 2},${windowCenter + windowWidth / 2}`);
+                options.push('-level', `${windowCenter - windowWidth/2},${windowCenter + windowWidth/2}`);
             } else {
                 // Auto-level and enhance contrast
                 options.push('-auto-level');
-                options.push('-contrast-stretch', '2%');
-                options.push('-sigmoidal-contrast', '3,50%');
+                // More aggressive contrast stretch with smaller threshold to preserve dark areas
+                options.push('-contrast-stretch', '1%');
+                // Increase contrast in mid-tones while preserving blacks
+                options.push('-sigmoidal-contrast', '4,50%');
             }
 
-            // Add brightness and gamma adjustment
-            options.push('-brightness-contrast', '20,10');
+            // Adjust brightness slightly down and increase contrast
+            options.push('-brightness-contrast', '10,20');
+            // Adjust gamma and then use levels to deepen the blacks
             options.push('-gamma', '0.8');
+            options.push('-level', '5%,95%,0.9');
+            // Final black point adjustment
+            options.push('-black-threshold', '5%');
 
             // Run ImageMagick with contrast enhancement
             await this.runImageMagickCommand(tempRawPath, absoluteTargetPath, options);

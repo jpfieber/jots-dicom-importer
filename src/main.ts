@@ -654,8 +654,11 @@ export default class DICOMHandlerPlugin extends Plugin {
                     if (this.settings.archiveDicomFiles) {
                         const dicomPath = `${organizedPath}/DICOM`;
                         await this.ensureFolderPath(dicomPath);
+                        // Use normalized filename for DICOM archive
+                        const normalizedNumber = this.dicomService.normalizeFileName(fileName);
+                        const archivedDicomName = `${normalizedNumber}${path.extname(fileName)}`;
                         await this.app.vault.createBinary(
-                            `${dicomPath}/${fileName}`,
+                            `${dicomPath}/${archivedDicomName}`,
                             fileBuffer
                         );
                     }
