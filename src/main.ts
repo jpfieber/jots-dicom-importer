@@ -10,14 +10,20 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import dicomParser from 'dicom-parser';
 import { HL7Parser } from './utils/hl7-parser';
+import { PathService } from './services/path-service';
 
 export default class DICOMHandlerPlugin extends Plugin {
     settings!: DICOMHandlerSettings;
     dicomService!: DICOMService;
     fileService!: FileService;
     viewerService!: ViewerService;
-    private folderCache: Set<string> = new Set();
-    private pathNormalizeCache: Map<string, string> = new Map();
+
+    private pathCache: Map<string, {
+        normalized: string,
+        folderExists: boolean,
+        timestamp: number
+    }> = new Map();
+    private readonly CACHE_TTL = 1000 * 60 * 30; // 30 minutes TTL
 
     async onload() {
         await this.loadSettings();
@@ -105,7 +111,6 @@ export default class DICOMHandlerPlugin extends Plugin {
     private getOrganizedFolderPath(basePath: string, dataset: dicomParser.DataSet): string {
         const parts: string[] = [];
 
-        // Add date-based subdirectories if format is specified
         const studyDate = dataset.string(DicomTags.StudyDate);
         if (studyDate && this.settings.subdirectoryFormat) {
             const datePath = this.formatDateForPath(studyDate, this.settings.subdirectoryFormat);
@@ -114,53 +119,38 @@ export default class DICOMHandlerPlugin extends Plugin {
             }
         }
 
-        // Study folder - use shorter format
-        const studyParts: string[] = [];
-        const studyDesc = dataset.string(DicomTags.StudyDescription);
-
-        // Build study folder name in exact format: "<date> - Study - <description> - <patient>"
-        let studyFolderName = '';
-        if (studyDate) studyFolderName = studyDate;
+        // Study folder
+        let studyFolderName = studyDate ? studyDate : '';
         studyFolderName += ' - Study';
-        if (studyDesc) studyFolderName += ` - ${this.truncateString(studyDesc, 30)}`;
-
-        // Add truncated patient name if available
+        if (dataset.string(DicomTags.StudyDescription)) {
+            studyFolderName += ` - ${this.truncateString(dataset.string(DicomTags.StudyDescription), 30)}`;
+        }
         const patientName = dataset.string(DicomTags.PatientName);
         if (patientName) {
             studyFolderName += ` - ${this.truncateString(this.formatPatientName(patientName), 20)}`;
         }
-
         parts.push(studyFolderName);
 
-        // Series folder - format: "<date> - Series - <description>"
-        const seriesNum = dataset.string(DicomTags.SeriesNumber);
-        const seriesDesc = dataset.string(DicomTags.SeriesDescription);
-
-        // Build series folder name in exact format
-        let seriesFolderName = '';
-        if (studyDate) seriesFolderName = studyDate;
+        // Series folder
+        let seriesFolderName = studyDate ? studyDate : '';
         seriesFolderName += ' - Series';
+        const seriesDesc = dataset.string(DicomTags.SeriesDescription);
+        const seriesNum = dataset.string(DicomTags.SeriesNumber);
         if (seriesDesc) {
             seriesFolderName += ` - ${this.truncateString(seriesDesc, 30)}`;
         } else if (seriesNum) {
             seriesFolderName += ` - ${seriesNum}`;
         }
-
         parts.push(seriesFolderName);
 
         // Sanitize and join paths
-        const sanitizedParts = parts.map(part => this.sanitizeFileName(part));
+        const sanitizedParts = parts.map(part => PathService.sanitizeFileName(part));
+        const fullPath = PathService.joinPath(basePath, ...sanitizedParts);
 
-        // Add Windows long path prefix if needed
-        let fullPath = path.join(basePath, ...sanitizedParts).replace(/\\/g, '/');
-        if (fullPath.length > 250 && process.platform === 'win32' && !fullPath.startsWith('\\\\?\\')) {
-            fullPath = `\\\\?\\${fullPath}`;
-        }
-
-        return fullPath;
+        return PathService.normalizePath(fullPath, true);
     }
 
-    private truncateString(str: string, maxLength: number): string {
+    private truncateString(str: string | undefined, maxLength: number): string {
         if (!str) return '';
         if (str.length <= maxLength) return str;
         return str.substring(0, maxLength - 3) + '...';
@@ -192,17 +182,32 @@ export default class DICOMHandlerPlugin extends Plugin {
     }
 
     private normalizePath(path: string): string {
-        const cached = this.pathNormalizeCache.get(path);
-        if (cached) return cached;
+        const now = Date.now();
+        const cached = this.pathCache.get(path);
+
+        if (cached) {
+            if (now - cached.timestamp < this.CACHE_TTL) {
+                return cached.normalized;
+            }
+            // Cache expired, remove it
+            this.pathCache.delete(path);
+        }
 
         const normalized = path.replace(/\\/g, '/');
-        this.pathNormalizeCache.set(path, normalized);
+        this.pathCache.set(path, {
+            normalized,
+            folderExists: false,
+            timestamp: now
+        });
         return normalized;
     }
 
     private async ensureFolderPath(folderPath: string): Promise<void> {
+        const now = Date.now();
         const normalizedPath = this.normalizePath(folderPath);
-        if (this.folderCache.has(normalizedPath)) {
+        const cached = this.pathCache.get(folderPath);
+
+        if (cached?.folderExists && now - cached.timestamp < this.CACHE_TTL) {
             return;
         }
 
@@ -211,12 +216,28 @@ export default class DICOMHandlerPlugin extends Plugin {
 
         for (const part of parts) {
             currentPath = currentPath ? `${currentPath}/${part}` : part;
-            if (!this.folderCache.has(currentPath)) {
+            const cacheEntry = this.pathCache.get(currentPath);
+
+            if (!cacheEntry?.folderExists || now - cacheEntry.timestamp >= this.CACHE_TTL) {
                 const folder = this.app.vault.getAbstractFileByPath(currentPath);
                 if (!folder) {
                     await this.app.vault.createFolder(currentPath);
                 }
-                this.folderCache.add(currentPath);
+                this.pathCache.set(currentPath, {
+                    normalized: this.normalizePath(currentPath),
+                    folderExists: true,
+                    timestamp: now
+                });
+            }
+        }
+    }
+
+    // Cache cleanup method
+    private cleanupCache(): void {
+        const now = Date.now();
+        for (const [path, entry] of this.pathCache.entries()) {
+            if (now - entry.timestamp >= this.CACHE_TTL) {
+                this.pathCache.delete(path);
             }
         }
     }
@@ -676,222 +697,180 @@ export default class DICOMHandlerPlugin extends Plugin {
     async convertFolder(sourceFolderPath: string, destinationFolderPath: string,
         onProgress?: (progress: { percentage: number, message: string }) => void) {
         try {
-            // Validate OpenJPEG settings
-            if (!this.settings.opjPath) {
-                throw new Error('Please configure the OpenJPEG path in settings');
-            }
-
-            // Validate that OpenJPEG exists
-            try {
-                await fs.access(this.settings.opjPath);
-            } catch {
-                throw new Error('OpenJPEG executable not found at specified path');
-            }
-
-            // Check if source folder exists (external folder)
-            try {
-                await fs.access(sourceFolderPath);
-            } catch {
-                throw new Error('Source folder not found or not accessible');
-            }
-
-            // Ensure destination folder exists
-            await this.ensureFolderPath(destinationFolderPath);
-
-            onProgress?.({ percentage: 10, message: 'Scanning for DICOM files...' });
-
-            // Recursively find all DICOM files in source folder and subfolders
+            await this.validateSettings();
             const dicomFiles = await this.findDicomFilesRecursively(sourceFolderPath);
 
             if (dicomFiles.length === 0) {
-                const methodDesc = this.settings.dicomIdentification === 'extension'
-                    ? `files with .${this.settings.dicomExtension} extension`
-                    : 'files without extension';
-                throw new Error(`No DICOM files found (looking for ${methodDesc})`);
+                throw new Error('No DICOM files found');
             }
 
-            let converted = 0;
-            const totalFiles = dicomFiles.length;
+            onProgress?.({ percentage: 20, message: `Found ${dicomFiles.length} DICOM files to import` });
 
-            // Track series by their SeriesInstanceUID
-            const seriesMap = new Map<string, {
-                dicomData: dicomParser.DataSet,
-                folderPath: string,
-                isReport: boolean,
-                isNew: boolean // Track if this is a new series
-            }>();
+            // Read all files first
+            const fileBuffers = await Promise.all(dicomFiles.map(async path => ({
+                path,
+                buffer: await fs.readFile(path)
+            })));
 
-            // Track studies by StudyInstanceUID
-            const studyMap = new Map<string, {
-                dicomData: dicomParser.DataSet,
-                seriesPaths: Set<string>,
-                hasNewSeries: boolean // Track if study has any new series
-            }>();
-
-            onProgress?.({ percentage: 20, message: `Found ${totalFiles} DICOM files to import` });
-
-            // First pass - analyze files and check for existing series
-            for (const filePath of dicomFiles) {
-                // Read the file from external folder
-                const fileBuffer = await fs.readFile(filePath);
-                const fileName = path.basename(filePath);
-
-                // Parse DICOM data
-                const arrayBuffer = new Uint8Array(fileBuffer).buffer;
-                const dicomData = this.dicomService.parseDicomData(arrayBuffer);
-
-                // Get organized path from root destination folder
-                const organizedPath = this.getOrganizedFolderPath(destinationFolderPath, dicomData).replace(/\\/g, '/');
-
-                // Check if series markdown file exists
-                const studyDate = dicomData.string(DicomTags.StudyDate) || '';
-                const folderName = organizedPath.split('/').pop() || 'series';
-                const sanitizedFolderName = folderName.replace(/^\d{8}\s*-\s*/, '');
-                const seriesMarkdownPath = path.join(
-                    organizedPath,
-                    `${studyDate ? studyDate + ' - ' : ''}${sanitizedFolderName}.md`
-                ).replace(/\\/g, '/');
-
-                // Check if series already exists
-                const seriesExists = await this.app.vault.adapter.exists(seriesMarkdownPath);
-
-                // Store DICOM data for metadata notes
-                const seriesInstanceUID = dicomData.string(DicomTags.SeriesInstanceUID);
-                if (seriesInstanceUID && !seriesMap.has(seriesInstanceUID)) {
-                    const isReport = dicomData.string(DicomTags.SOPClassUID) === '1.2.840.10008.5.1.4.1.1.88.11' || // Basic Text SR
-                        dicomData.string(DicomTags.SOPClassUID) === '1.2.840.10008.5.1.4.1.1.88.22' || // Enhanced SR
-                        dicomData.string(DicomTags.SOPClassUID) === '1.2.840.10008.5.1.4.1.1.88.33';  // Comprehensive SR
-
-                    seriesMap.set(seriesInstanceUID, {
-                        dicomData,
-                        folderPath: organizedPath,
-                        isReport,
-                        isNew: !seriesExists
-                    });
-
-                    // Track studies and whether they have new series
-                    const studyInstanceUID = dicomData.string(DicomTags.StudyInstanceUID);
-                    if (studyInstanceUID) {
-                        if (!studyMap.has(studyInstanceUID)) {
-                            studyMap.set(studyInstanceUID, {
-                                dicomData,
-                                seriesPaths: new Set<string>(),
-                                hasNewSeries: !seriesExists
-                            });
-                        } else {
-                            // Update hasNewSeries if this series is new
-                            const study = studyMap.get(studyInstanceUID)!;
-                            study.hasNewSeries = study.hasNewSeries || !seriesExists;
-                        }
-                        studyMap.get(studyInstanceUID)?.seriesPaths.add(organizedPath);
-                    }
-                }
-
-                // Skip this file if its series already exists
-                if (seriesExists) {
-                    continue;
-                }
-
-                // Process the file only if the series doesn't exist
-                try {
-                    if (!dicomData.string(DicomTags.SOPClassUID)?.includes('1.2.840.10008.5.1.4.1.1.88')) {
-                        // For image files, create Images folder and attempt conversion
-                        const imagesPath = `${organizedPath}/Images`;
-                        await this.ensureFolderPath(imagesPath);
-
-                        // Remove the original extension (if any) before adding .png
-                        const baseFileName = path.parse(fileName).name;
-                        const targetPath = `${imagesPath}/${baseFileName}.png`;
-                        await this.dicomService.convertToImage({
-                            path: filePath,
-                            name: fileName,
-                            basename: path.parse(fileName).name,
-                            extension: path.parse(fileName).ext.slice(1),
-                            parent: null,
-                            vault: this.app.vault,
-                            stat: { mtime: Date.now(), ctime: Date.now(), size: fileBuffer.length }
-                        } as TFile, targetPath);
-                    }
-
-                    // Archive original DICOM file if enabled (for both images and reports)
-                    if (this.settings.archiveDicomFiles) {
-                        const dicomPath = `${organizedPath}/DICOM`;
-                        await this.ensureFolderPath(dicomPath);
-                        // Use normalized filename for DICOM archive
-                        const normalizedNumber = this.dicomService.normalizeFileName(fileName);
-                        const archivedDicomName = `${normalizedNumber}${path.extname(fileName)}`;
-                        await this.app.vault.createBinary(
-                            `${dicomPath}/${archivedDicomName}`,
-                            fileBuffer
-                        );
-                    }
-
-                    converted++;
-
-                    // Update progress
-                    const percentage = Math.min(90, 20 + Math.round((converted / totalFiles) * 70));
-                    onProgress?.({
-                        percentage,
-                        message: `Processing file ${converted} of ${totalFiles}: ${path.basename(filePath)}`
-                    });
-                } catch (error) {
-                    console.error(`Error importing ${path.basename(filePath)}:`, error);
-                    throw error;
-                }
+            // Process in batches of 10 files
+            const batchSize = 10;
+            for (let i = 0; i < fileBuffers.length; i += batchSize) {
+                const batch = fileBuffers.slice(i, i + batchSize);
+                await this.processBatch(batch, destinationFolderPath, onProgress);
             }
 
-            onProgress?.({ percentage: 90, message: 'Creating animated GIFs...' });
-
-            // Create animated GIFs only for new series
-            for (const { folderPath, isReport, isNew } of seriesMap.values()) {
-                if (!isReport && isNew) {
-                    // Get the series name from the folder path for the GIF name
-                    const seriesFolder = folderPath.split('/').pop() || 'series';
-                    const gifPath = `${folderPath}/${seriesFolder}.gif`;
-                    const imagesPath = `${folderPath}/Images`;
-                    try {
-                        await this.dicomService.createAnimatedGif(imagesPath, gifPath);
-                    } catch (error) {
-                        if (error instanceof Error) {
-                            console.error(`Failed to create GIF for series ${seriesFolder}: ${error.message}`);
-                        } else {
-                            console.error(`Failed to create GIF for series ${seriesFolder}: Unknown error`);
-                        }
-                    }
-                }
-            }
-
-            onProgress?.({ percentage: 95, message: 'Creating metadata notes...' });
-
-            // Create metadata notes only for new series
-            for (const { dicomData, folderPath, isNew } of seriesMap.values()) {
-                if (isNew) {
-                    await this.createMetadataNote(dicomData, folderPath);
-                }
-            }
-
-            // After processing all files, create/update study metadata notes only for studies with new series
-            onProgress?.({ percentage: 97, message: 'Creating study metadata notes...' });
-
-            for (const [studyUID, studyData] of studyMap.entries()) {
-                if (studyData.hasNewSeries) {
-                    await this.createStudyMetadataNote(studyUID, {
-                        dicomData: studyData.dicomData,
-                        seriesPaths: Array.from(studyData.seriesPaths)
-                    });
-                }
-            }
-
-            const newSeriesCount = Array.from(seriesMap.values()).filter(s => s.isNew).length;
-            onProgress?.({ percentage: 100, message: `Successfully imported ${newSeriesCount} new series` });
-
+            onProgress?.({ percentage: 100, message: 'Import complete' });
         } catch (error) {
             if (error instanceof Error) {
                 throw new Error(`Error importing files: ${error.message}`);
-            } else {
-                throw new Error('Error importing files');
+            }
+            throw new Error('Error importing files');
+        }
+    }
+
+    private async processBatch(
+        files: { path: string, buffer: Buffer }[],
+        destinationPath: string,
+        onProgress?: (progress: { percentage: number, message: string }) => void
+    ): Promise<void> {
+        const batchResults = new Map<string, {
+            dicomData: dicomParser.DataSet,
+            isNew: boolean,
+            targetPath: string
+        }>();
+
+        // First pass - analyze all files in batch
+        for (const file of files) {
+            const arrayBuffer = new Uint8Array(file.buffer).buffer;
+            const dicomData = this.dicomService.parseDicomData(arrayBuffer);
+            const organizedPath = this.getOrganizedFolderPath(destinationPath, dicomData);
+
+            const seriesUID = dicomData.string(DicomTags.SeriesInstanceUID);
+            if (!seriesUID) continue;
+
+            const seriesExists = await this.app.vault.adapter.exists(
+                PathService.joinPath(organizedPath, 'metadata.md')
+            );
+
+            batchResults.set(file.path, {
+                dicomData,
+                isNew: !seriesExists,
+                targetPath: organizedPath
+            });
+        }
+
+        // Process files by series and track studies
+        const seriesGroups = new Map<string, {
+            files: { path: string, buffer: Buffer }[],
+            targetPath: string,
+            dicomData: dicomParser.DataSet
+        }>();
+
+        const studyGroups = new Map<string, {
+            dicomData: dicomParser.DataSet,
+            seriesPaths: string[]
+        }>();
+
+        for (const [filePath, result] of batchResults.entries()) {
+            if (!result.isNew) continue;
+
+            const seriesUID = result.dicomData.string(DicomTags.SeriesInstanceUID);
+            const studyUID = result.dicomData.string(DicomTags.StudyInstanceUID);
+            if (!seriesUID || !studyUID) continue;
+
+            const fileInfo = files.find(f => f.path === filePath);
+            if (!fileInfo) continue;
+
+            // Track series
+            if (!seriesGroups.has(seriesUID)) {
+                seriesGroups.set(seriesUID, {
+                    files: [],
+                    targetPath: result.targetPath,
+                    dicomData: result.dicomData
+                });
+            }
+            seriesGroups.get(seriesUID)?.files.push(fileInfo);
+
+            // Track study
+            if (!studyGroups.has(studyUID)) {
+                studyGroups.set(studyUID, {
+                    dicomData: result.dicomData,
+                    seriesPaths: []
+                });
+            }
+            if (!studyGroups.get(studyUID)?.seriesPaths.includes(result.targetPath)) {
+                studyGroups.get(studyUID)?.seriesPaths.push(result.targetPath);
             }
         }
+
+        // Process each series
+        let processedSeries = 0;
+        for (const [seriesUID, group] of seriesGroups) {
+            await this.ensureFolderPath(group.targetPath);
+
+            // Process images in parallel
+            if (!this.isStructuredReport(group.dicomData)) {
+                const imagesPath = PathService.joinPath(group.targetPath, 'Images');
+                await this.ensureFolderPath(imagesPath);
+
+                await Promise.all(group.files.map(async file => {
+                    const fileName = path.basename(file.path);
+                    const baseFileName = path.parse(fileName).name;
+                    const targetPath = PathService.joinPath(imagesPath, `${baseFileName}.png`);
+
+                    await this.dicomService.convertToImage({
+                        path: file.path,
+                        name: fileName,
+                        basename: baseFileName,
+                        extension: path.parse(fileName).ext.slice(1),
+                        parent: null,
+                        vault: this.app.vault,
+                        stat: { mtime: Date.now(), ctime: Date.now(), size: file.buffer.length }
+                    } as TFile, targetPath);
+                }));
+
+                // Create animated GIF if enabled
+                if (this.settings.createAnimatedGif) {
+                    const seriesName = group.targetPath.split('/').pop() || 'series';
+                    const gifPath = PathService.joinPath(group.targetPath, `${seriesName}.gif`);
+                    await this.dicomService.createAnimatedGif(imagesPath, gifPath);
+                }
+            }
+
+            // Create metadata note
+            await this.createMetadataNote(group.dicomData, group.targetPath);
+
+            // Archive original files if enabled
+            if (this.settings.archiveDicomFiles) {
+                const dicomPath = PathService.joinPath(group.targetPath, 'DICOM');
+                await this.ensureFolderPath(dicomPath);
+
+                await Promise.all(group.files.map(async file => {
+                    const normalizedNumber = this.dicomService.normalizeFileName(path.basename(file.path));
+                    const archivedName = `${normalizedNumber}${path.extname(file.path)}`;
+                    const targetPath = PathService.joinPath(dicomPath, archivedName);
+                    await this.app.vault.createBinary(targetPath, file.buffer);
+                }));
+            }
+
+            processedSeries++;
+            onProgress?.({
+                percentage: Math.min(90, 20 + Math.round((processedSeries / seriesGroups.size) * 70)),
+                message: `Processing series ${processedSeries} of ${seriesGroups.size}`
+            });
+        }
+
+        // Create study metadata notes after all series are processed
+        for (const [studyUID, studyData] of studyGroups) {
+            await this.createStudyMetadataNote(studyUID, studyData);
+        }
+    }
+
+    private isStructuredReport(dicomData: dicomParser.DataSet): boolean {
+        const sopClassUID = dicomData.string(DicomTags.SOPClassUID);
+        return sopClassUID === '1.2.840.10008.5.1.4.1.1.88.11' || // Basic Text SR
+            sopClassUID === '1.2.840.10008.5.1.4.1.1.88.22' || // Enhanced SR
+            sopClassUID === '1.2.840.10008.5.1.4.1.1.88.33';  // Comprehensive SR
     }
 
     private isDicomFile(filename: string): boolean {
@@ -954,5 +933,17 @@ export default class DICOMHandlerPlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+    }
+
+    private async validateSettings(): Promise<void> {
+        if (!this.settings.opjPath) {
+            throw new Error('Please configure the OpenJPEG path in settings');
+        }
+
+        try {
+            await fs.access(this.settings.opjPath);
+        } catch {
+            throw new Error('OpenJPEG executable not found at specified path');
+        }
     }
 }
