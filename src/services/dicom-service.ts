@@ -237,21 +237,28 @@ export class DICOMService {
                 // Use DICOM window/level settings if available
                 options.push('-level', `${windowCenter - windowWidth / 2},${windowCenter + windowWidth / 2}`);
             } else {
-                // Auto-level and enhance contrast
+                // Auto-level first to normalize the range
                 options.push('-auto-level');
-                // More aggressive contrast stretch with smaller threshold to preserve dark areas
-                options.push('-contrast-stretch', '1%');
-                // Increase contrast in mid-tones while preserving blacks
-                options.push('-sigmoidal-contrast', '4,50%');
-            }
 
-            // Adjust brightness slightly down and increase contrast
-            options.push('-brightness-contrast', '10,20');
-            // Adjust gamma and then use levels to deepen the blacks
-            options.push('-gamma', '0.8');
-            options.push('-level', '5%,95%,0.9');
-            // Final black point adjustment
-            options.push('-black-threshold', '5%');
+                if (this.lastTransferSyntax === '1.2.840.10008.1.2.4.90') {
+                    // More aggressive settings for JPEG 2000 images
+                    // Reduce brightness and increase contrast
+                    options.push('-brightness-contrast', '-25,25');
+                    // Apply CLAHE with more aggressive parameters
+                    options.push('-clahe', '16x16+128+6');
+                    // Darken mid-tones more
+                    options.push('-gamma', '1.2');
+                    // Fine-tune levels to enhance blacks and reduce highlights
+                    options.push('-level', '5%,90%,1.1');
+                } else {
+                    // Less aggressive settings for other formats
+                    options.push('-contrast-stretch', '2%');
+                    options.push('-clahe', '10x10+64+8');
+                    options.push('-brightness-contrast', '-15,20');
+                    options.push('-gamma', '1.1');
+                    options.push('-level', '3%,97%,1.0');
+                }
+            }
 
             // Run ImageMagick with contrast enhancement
             await this.runImageMagickCommand(tempRawPath, absoluteTargetPath, options);

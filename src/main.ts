@@ -23,7 +23,7 @@ export default class DICOMHandlerPlugin extends Plugin {
         this.dicomService = new DICOMService(this.app, this.settings);
         this.fileService = new FileService(this.settings);
         this.viewerService = new ViewerService(this.app, this.dicomService);
-        this.metadataService = new MetadataService(this.app);
+        this.metadataService = new MetadataService(this.app, this.settings);
         this.batchProcessor = new BatchProcessor(this.app, this.dicomService, this.metadataService, this.settings);
 
         this.addSettingTab(new DICOMHandlerSettingsTab(this.app, this));
@@ -78,12 +78,8 @@ export default class DICOMHandlerPlugin extends Plugin {
                 buffer: await fs.readFile(path)
             })));
 
-            // Process in batches of 10 files
-            const batchSize = 10;
-            for (let i = 0; i < fileBuffers.length; i += batchSize) {
-                const batch = fileBuffers.slice(i, i + batchSize);
-                await this.batchProcessor.processBatch(batch, destinationFolderPath, onProgress);
-            }
+            // Process all files in a single batch
+            await this.batchProcessor.processBatch(fileBuffers, destinationFolderPath, onProgress);
 
             onProgress?.({ percentage: 100, message: 'Import complete' });
         } catch (error) {

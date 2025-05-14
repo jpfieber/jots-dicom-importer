@@ -3,11 +3,15 @@ import { DicomTags } from '../models/dicom-tags';
 import { DicomModalities } from '../models/dicom-modalities';
 import { HL7Parser } from '../utils/hl7-parser';
 import { PathService } from './path-service';
+import { DICOMHandlerSettings } from '../settings';
 import * as path from 'path';
 import dicomParser from 'dicom-parser';
 
 export class MetadataService {
-    constructor(private app: App) { }
+    constructor(
+        private app: App,
+        private settings: DICOMHandlerSettings
+    ) { }
 
     private isLikelyName(str: string): boolean {
         str = str.trim();
@@ -211,19 +215,33 @@ export class MetadataService {
 
                 if (imagesFolder instanceof TFolder) {
                     const imageFiles = imagesFolder.children
-                        .filter(file => file instanceof TFile &&
-                            ['png', 'jpg', 'jpeg'].includes(file.extension))
-                        .sort((a, b) => a.name.localeCompare(b.name));
+                        .filter(file => file instanceof TFile && file.extension === 'png')
+                        .sort((a, b) => {
+                            // Extract numbers from filenames for numeric sorting
+                            const aNum = parseInt((a.name.match(/\d+/) || ['0'])[0]);
+                            const bNum = parseInt((b.name.match(/\d+/) || ['0'])[0]);
+                            return aNum - bNum;
+                        });
 
                     if (imageFiles.length > 0) {
                         content += `## Gallery\n\n`;
+                        let lineContent = '';
+                        const width = this.settings.galleryImageWidth || 150;
+
                         imageFiles.forEach((file, index) => {
-                            content += `![[${file.name}|150]]`;
-                            if (index < imageFiles.length - 1) {
-                                content += ' ';
+                            lineContent += `![[${file.name}|${width}]]`;
+                            // Add a newline every 4 images for better layout
+                            if ((index + 1) % 4 === 0 || index === imageFiles.length - 1) {
+                                content += lineContent + '\n';
+                                lineContent = '';
+                            } else {
+                                lineContent += ' ';
                             }
                         });
-                        content += '\n\n';
+                        if (lineContent) {
+                            content += lineContent + '\n';
+                        }
+                        content += '\n';
                     }
                 }
             }
@@ -240,7 +258,14 @@ export class MetadataService {
                 await this.app.vault.createFolder(folderPath.replace(/\\/g, '/'));
             }
 
-            await this.app.vault.create(notePath, content);
+            // Check if file exists first
+            const existingFile = this.app.vault.getAbstractFileByPath(notePath);
+            if (existingFile instanceof TFile) {
+                // Update existing file instead of throwing error
+                await this.app.vault.modify(existingFile, content);
+            } else {
+                await this.app.vault.create(notePath, content);
+            }
         } catch (error) {
             console.error('Error creating metadata note:', error);
             throw error;

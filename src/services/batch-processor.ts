@@ -23,7 +23,6 @@ export class BatchProcessor {
     ): Promise<void> {
         const batchResults = new Map<string, {
             dicomData: dicomParser.DataSet;
-            isNew: boolean;
             targetPath: string;
         }>();
 
@@ -34,15 +33,13 @@ export class BatchProcessor {
             const organizedPath = this.getOrganizedFolderPath(destinationPath, dicomData);
 
             const seriesUID = dicomData.string(DicomTags.SeriesInstanceUID);
-            if (!seriesUID) continue;
-
-            const seriesExists = await this.app.vault.adapter.exists(
-                PathService.joinPath(organizedPath, 'metadata.md')
-            );
+            if (!seriesUID) {
+                console.warn(`No SeriesInstanceUID found for file: ${file.path}`);
+                continue;
+            }
 
             batchResults.set(file.path, {
                 dicomData,
-                isNew: !seriesExists,
                 targetPath: organizedPath
             });
         }
@@ -60,8 +57,6 @@ export class BatchProcessor {
         }>();
 
         for (const [filePath, result] of batchResults.entries()) {
-            if (!result.isNew) continue;
-
             const seriesUID = result.dicomData.string(DicomTags.SeriesInstanceUID);
             const studyUID = result.dicomData.string(DicomTags.StudyInstanceUID);
             if (!seriesUID || !studyUID) continue;
@@ -101,30 +96,40 @@ export class BatchProcessor {
                 const imagesPath = PathService.joinPath(group.targetPath, 'Images');
                 await this.ensureFolderPath(imagesPath);
 
+                // Convert all images in series
                 await Promise.all(group.files.map(async file => {
-                    const fileName = path.basename(file.path);
-                    const baseFileName = path.parse(fileName).name;
-                    const targetPath = PathService.joinPath(imagesPath, `${baseFileName}.png`);
+                    try {
+                        const fileName = path.basename(file.path);
+                        const baseFileName = this.dicomService.normalizeFileName(path.parse(fileName).name);
+                        const targetPath = PathService.joinPath(imagesPath, `${baseFileName}.png`);
 
-                    await this.dicomService.convertToImage({
-                        path: file.path,
-                        name: fileName,
-                        basename: baseFileName,
-                        extension: path.parse(fileName).ext.slice(1),
-                        parent: null,
-                        vault: this.app.vault,
-                        stat: { mtime: Date.now(), ctime: Date.now(), size: file.buffer.length }
-                    } as TFile, targetPath);
+                        await this.dicomService.convertToImage({
+                            path: file.path,
+                            name: fileName,
+                            basename: baseFileName,
+                            extension: path.parse(fileName).ext.slice(1),
+                            parent: null,
+                            vault: this.app.vault,
+                            stat: { mtime: Date.now(), ctime: Date.now(), size: file.buffer.length }
+                        } as TFile, targetPath);
+                    } catch (error) {
+                        console.error(`Failed to convert file ${file.path}: ${error}`);
+                    }
                 }));
 
+                // Create animated GIF after all images are processed
                 if (this.settings.createAnimatedGif) {
                     const seriesName = group.targetPath.split('/').pop() || 'series';
                     const gifPath = PathService.joinPath(group.targetPath, `${seriesName}.gif`);
-                    await this.dicomService.createAnimatedGif(imagesPath, gifPath);
+                    try {
+                        await this.dicomService.createAnimatedGif(imagesPath, gifPath);
+                    } catch (error) {
+                        console.error(`Failed to create GIF for series: ${error}`);
+                    }
                 }
             }
 
-            // Create metadata note
+            // Create or update metadata note
             await this.metadataService.createMetadataNote(group.dicomData, group.targetPath);
 
             // Archive original files if enabled
@@ -229,7 +234,11 @@ export class BatchProcessor {
 
         await Promise.all(group.files.map(async file => {
             const normalizedNumber = this.dicomService.normalizeFileName(path.basename(file.path));
-            const archivedName = `${normalizedNumber}${path.extname(file.path)}`;
+            const extension = path.extname(file.path);
+            // Add .dcm extension if enabled and file doesn't already have an extension
+            const archivedName = this.settings.addDcmExtension && !extension
+                ? `${normalizedNumber}.dcm`
+                : `${normalizedNumber}${extension}`;
             const archivePath = PathService.joinPath(dicomPath, archivedName);
             await this.app.vault.createBinary(archivePath, file.buffer);
         }));
