@@ -61,11 +61,9 @@ export class FileService {
     }
 
     private isDicomFile(filename: string): boolean {
-        if (this.settings.dicomIdentification === 'extension') {
-            return filename.toLowerCase().endsWith(`.${this.settings.dicomExtension.toLowerCase()}`);
-        } else {
-            return path.extname(filename) === '';
-        }
+        // Check if file has no extension or has .dcm extension
+        const ext = path.extname(filename);
+        return ext === '' || ext.toLowerCase() === '.dcm';
     }
 
     // Checks if a file exists

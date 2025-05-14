@@ -648,7 +648,7 @@ export class DICOMService {
     }
 
     async createAnimatedGif(imagesPath: string, outputPath: string): Promise<void> {
-        if (!this.settings.createAnimatedGif || !this.settings.imagemagickPath) {
+        if (!this.settings.createAnimatedGif || !this.settings.magickPath) {
             return;
         }
 
@@ -680,14 +680,14 @@ export class DICOMService {
                 const absoluteOutputPath = path.join(vaultPath, outputPath).replace(/\\/g, '/');
 
                 // ImageMagick command with wildcard pattern
-                const command = `"${this.settings.imagemagickPath}" -delay ${this.settings.gifFrameDelay / 10} "${inputPattern}" -loop 0 "${absoluteOutputPath}"`;
+                const command = `"${this.settings.magickPath}" -delay ${this.settings.gifFrameDelay / 10} "${inputPattern}" -loop 0 "${absoluteOutputPath}"`;
 
                 exec(command, {
                     windowsHide: true,
                     maxBuffer: 1024 * 1024 * 100,
                     env: {
                         ...process.env,
-                        MAGICK_CONFIGURE_PATH: path.dirname(this.settings.imagemagickPath)
+                        MAGICK_CONFIGURE_PATH: path.dirname(this.settings.magickPath)
                     }
                 }, (error: any, stdout: string, stderr: string) => {
                     if (error) {
