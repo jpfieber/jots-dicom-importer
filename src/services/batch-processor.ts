@@ -88,6 +88,7 @@ export class BatchProcessor {
 
         // Process each series
         let processedSeries = 0;
+        let skippedFiles = 0;
         for (const [seriesUID, group] of seriesGroups) {
             await this.ensureFolderPath(group.targetPath);
 
@@ -97,11 +98,18 @@ export class BatchProcessor {
                 await this.ensureFolderPath(imagesPath);
 
                 // Convert all images in series
-                await Promise.all(group.files.map(async file => {
+                const results = await Promise.all(group.files.map(async file => {
                     try {
                         const fileName = path.basename(file.path);
                         const baseFileName = this.dicomService.normalizeFileName(path.parse(fileName).name);
                         const targetPath = PathService.joinPath(imagesPath, `${baseFileName}.png`);
+
+                        // Check if file exists before attempting conversion
+                        const exists = await this.app.vault.adapter.exists(targetPath);
+                        if (exists) {
+                            skippedFiles++;
+                            return { skipped: true };
+                        }
 
                         await this.dicomService.convertToImage({
                             path: file.path,
@@ -112,8 +120,14 @@ export class BatchProcessor {
                             vault: this.app.vault,
                             stat: { mtime: Date.now(), ctime: Date.now(), size: file.buffer.length }
                         } as TFile, targetPath);
+                        return { skipped: false };
                     } catch (error) {
+                        if (error instanceof Error && error.message.includes('already exists')) {
+                            skippedFiles++;
+                            return { skipped: true };
+                        }
                         console.error(`Failed to convert file ${file.path}: ${error}`);
+                        return { skipped: false, error };
                     }
                 }));
 
@@ -142,19 +156,35 @@ export class BatchProcessor {
 
             // Archive original files if enabled
             if (this.settings.archiveDicomFiles) {
-                await this.archiveOriginalFiles(group, group.targetPath);
+                try {
+                    await this.archiveOriginalFiles(group, group.targetPath);
+                } catch (error) {
+                    if (!(error instanceof Error && error.message.includes('already exists'))) {
+                        console.error(`Failed to archive original files: ${error}`);
+                    }
+                }
             }
 
             processedSeries++;
+            const progressMessage = skippedFiles > 0 
+                ? `Processing series ${processedSeries} of ${seriesGroups.size} (${skippedFiles} files skipped)`
+                : `Processing series ${processedSeries} of ${seriesGroups.size}`;
+            
             onProgress?.({
                 percentage: Math.min(90, 20 + Math.round((processedSeries / seriesGroups.size) * 70)),
-                message: `Processing series ${processedSeries} of ${seriesGroups.size}`
+                message: progressMessage
             });
         }
 
         // Create study metadata notes after all series are processed
         for (const [studyUID, studyData] of studyGroups) {
-            await this.metadataService.createStudyMetadataNote(studyUID, studyData);
+            try {
+                await this.metadataService.createStudyMetadataNote(studyUID, studyData);
+            } catch (error) {
+                if (!(error instanceof Error && error.message.includes('already exists'))) {
+                    console.error(`Failed to create study metadata note: ${error}`);
+                }
+            }
         }
     }
 

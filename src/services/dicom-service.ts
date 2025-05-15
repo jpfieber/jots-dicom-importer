@@ -144,6 +144,24 @@ export class DICOMService {
         const tempFiles: string[] = [];
 
         try {
+            // If target path is specified, check if file exists
+            if (targetPath) {
+                try {
+                    // Check if file exists in vault
+                    const existingFile = this.app.vault.getAbstractFileByPath(
+                        targetPath.startsWith((this.app.vault.adapter as any).basePath) ?
+                            path.relative((this.app.vault.adapter as any).basePath, targetPath) : targetPath
+                    );
+                    if (existingFile) {
+                        // File exists, skip conversion and return empty string to signal skip
+                        return '';
+                    }
+                } catch (error) {
+                    // Error checking file existence, continue with conversion
+                    console.debug('Error checking file existence:', error);
+                }
+            }
+
             const arrayBuffer = await this.loadDICOMFile(file);
             const dicomData = this.parseDicomData(arrayBuffer);
 
@@ -220,12 +238,21 @@ export class DICOMService {
                 const targetDir = path.dirname(absoluteTargetPath);
                 await fs.mkdir(targetDir, { recursive: true });
 
-                // Create the file in the vault
-                await this.app.vault.createBinary(
-                    targetPath.startsWith(vaultPath) ?
-                        path.relative(vaultPath, targetPath) : targetPath,
-                    binaryData
-                );
+                try {
+                    // Create the file in the vault
+                    await this.app.vault.createBinary(
+                        targetPath.startsWith(vaultPath) ?
+                            path.relative(vaultPath, targetPath) : targetPath,
+                        binaryData
+                    );
+                } catch (error) {
+                    if (error instanceof Error && error.message.includes('already exists')) {
+                        // File was created between our check and creation attempt, skip it
+                        console.debug(`File ${targetPath} already exists, skipping`);
+                        return '';
+                    }
+                    throw error;
+                }
             }
 
             return result;
