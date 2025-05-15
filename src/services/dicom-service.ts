@@ -28,12 +28,8 @@ export class DICOMService {
             transferSyntax === '1.2.840.10008.1.2' ||    // Implicit VR Little Endian
             transferSyntax === '1.2.840.10008.1.2.2') {  // Explicit VR Big Endian
 
-            // Create a new buffer from the pixel data, respecting the element's offset and length
-            const buffer = Buffer.from(
-                dicomData.byteArray.buffer,
-                pixelDataElement.dataOffset,
-                pixelDataElement.length
-            );
+            // Create a new buffer directly from dicomParser's byteArray, preserving correct offsets
+            const buffer = Buffer.from(dicomData.byteArray.buffer, dicomData.byteArray.byteOffset + pixelDataElement.dataOffset, pixelDataElement.length);
 
             // Handle big endian data if needed
             if (transferSyntax === '1.2.840.10008.1.2.2') {
@@ -146,166 +142,106 @@ export class DICOMService {
 
     async convertToImage(file: TFile, targetPath?: string): Promise<string> {
         const tempFiles: string[] = [];
-        let result: string | undefined;
 
         try {
-            // Check for ImageMagick
-            if (!this.settings.magickPath) {
-                throw new Error('ImageMagick path is not configured');
-            }
-
             const arrayBuffer = await this.loadDICOMFile(file);
             const dicomData = this.parseDicomData(arrayBuffer);
-
-            // Normalize the filename
-            const normalizedNumber = this.normalizeFileName(file.basename);
-
-            // Update target path with normalized number
-            if (targetPath) {
-                const targetDir = path.dirname(targetPath);
-                targetPath = path.join(targetDir, `${normalizedNumber}.png`);
-            }
 
             // Get and store transfer syntax before extracting pixel data
             this.lastTransferSyntax = dicomData.string(DicomTags.TransferSyntaxUID) || 'default';
 
-            // Only try to extract pixel data for non-SR documents
+            // Extract pixel data
             const { data, needsDecompression } = this.extractPixelData(dicomData);
 
-            // Get window/level settings from DICOM if available
-            const windowCenter = dicomData.floatString(DicomTags.WindowCenter);
-            const windowWidth = dicomData.floatString(DicomTags.WindowWidth);
-            const rescaleSlope = dicomData.floatString(DicomTags.RescaleSlope) || 1;
-            const rescaleIntercept = dicomData.floatString(DicomTags.RescaleIntercept) || 0;
+            let result: string;
 
-            // Create a temporary file for the raw pixel data
-            const os = require('os');
-            const crypto = require('crypto');
-            const hash = crypto.createHash('md5').update(file.basename).digest('hex').substring(0, 8);
-            const tempRawPath = path.join(os.tmpdir(), `dicom_raw_${hash}.pgm`);
-            tempFiles.push(tempRawPath);
-
-            if (needsDecompression) {
-                // For compressed data, we'll need an intermediate file
-                const converter = getDicomConverter(this.lastTransferSyntax);
-                const tempCompressedPath = path.join(os.tmpdir(), `dicom_tmp_${hash}.${converter.tempExtension}`);
-                tempFiles.push(tempCompressedPath);
-
-                // Write the compressed data
-                await fs.writeFile(tempCompressedPath, data);
-
-                // Decompress first
-                if (converter.utility === 'magick') {
-                    await this.runImageMagickCommand(tempCompressedPath, tempRawPath, []);
-                } else {
-                    await this.runConverter(tempCompressedPath, tempRawPath);
+            if (this.lastTransferSyntax === '1.2.840.10008.1.2.4.70') {  // JPEG Lossless
+                if (!this.settings.magickPath) {
+                    throw new Error('ImageMagick path is not configured');
                 }
+
+                // Create temporary files for JPEG processing
+                const os = require('os');
+                const crypto = require('crypto');
+                const hash = crypto.createHash('md5').update(file.basename).digest('hex').substring(0, 8);
+                const tempJpegPath = path.join(os.tmpdir(), `dicom_tmp_${hash}.jpg`);
+                const tempPngPath = path.join(os.tmpdir(), `dicom_tmp_${hash}.png`);
+                tempFiles.push(tempJpegPath, tempPngPath);
+
+                // Write JPEG data to temp file
+                await fs.writeFile(tempJpegPath, data);
+
+                // Convert JPEG to PNG using ImageMagick
+                await this.runImageMagickCommand(tempJpegPath, tempPngPath, ['-auto-level']);
+
+                // Read the converted PNG
+                const pngData = await fs.readFile(tempPngPath);
+                result = `data:image/png;base64,${pngData.toString('base64')}`;
             } else {
-                // For raw data, write PGM file directly
-                const columns = dicomData.uint16(DicomTags.Columns) || 0;
-                const rows = dicomData.uint16(DicomTags.Rows) || 0;
-                const bitsAllocated = dicomData.uint16(DicomTags.BitsAllocated) || 16;
+                // For all other formats, use our direct pixel manipulation
+                if (needsDecompression) {
+                    // For compressed data (e.g. JPEG 2000), decompress first
+                    const os = require('os');
+                    const crypto = require('crypto');
+                    const hash = crypto.createHash('md5').update(file.basename).digest('hex').substring(0, 8);
+                    const tempCompressedPath = path.join(os.tmpdir(), `dicom_tmp_${hash}.j2k`);
+                    const tempDecompressedPath = path.join(os.tmpdir(), `dicom_tmp_${hash}.pgm`);
+                    tempFiles.push(tempCompressedPath, tempDecompressedPath);
 
-                // Create PGM header
-                const pgmHeader = Buffer.from(`P5\n${columns} ${rows}\n${Math.pow(2, bitsAllocated) - 1}\n`);
+                    // Write the compressed data
+                    await fs.writeFile(tempCompressedPath, data);
 
-                // Write PGM file with header and pixel data
-                await fs.writeFile(tempRawPath, Buffer.concat([pgmHeader, data]));
-            }
+                    // Decompress using OpenJPEG
+                    if (!this.settings.opjPath) {
+                        throw new Error('OpenJPEG path is not configured');
+                    }
+                    await this.runConverter(tempCompressedPath, tempDecompressedPath);
 
-            // Ensure we have an absolute path for the target
-            const vaultPath = (this.app.vault.adapter as any).basePath;
-            const absoluteTargetPath = targetPath?.startsWith('C:') || targetPath?.startsWith('/')
-                ? targetPath
-                : path.join(vaultPath, targetPath || '');
-
-            if (absoluteTargetPath.length >= 260) {
-                const shortenedPath = this.shortenPath(absoluteTargetPath);
-                targetPath = shortenedPath;
-            }
-
-            // Create target directory if needed
-            const targetDir = path.dirname(absoluteTargetPath);
-            await fs.mkdir(targetDir, { recursive: true }).catch(err => {
-                throw err;
-            });
-
-            // Build ImageMagick command options for contrast enhancement
-            const options = [];
-
-            if (windowCenter !== undefined && windowWidth !== undefined) {
-                // Use DICOM window/level settings if available
-                options.push('-level', `${windowCenter - windowWidth / 2},${windowCenter + windowWidth / 2}`);
-            } else {
-                // Auto-level first to normalize the range
-                options.push('-auto-level');
-
-                if (this.lastTransferSyntax === '1.2.840.10008.1.2.4.90') {
-                    // More aggressive settings for JPEG 2000 images
-                    // Reduce brightness and increase contrast
-                    options.push('-brightness-contrast', '-25,25');
-                    // Apply CLAHE with more aggressive parameters
-                    options.push('-clahe', '16x16+128+6');
-                    // Darken mid-tones more
-                    options.push('-gamma', '1.2');
-                    // Fine-tune levels to enhance blacks and reduce highlights
-                    options.push('-level', '5%,90%,1.1');
+                    // Read the decompressed data
+                    const decompressedData = await fs.readFile(tempDecompressedPath);
+                    result = await this.convertRawToImage(decompressedData, dicomData);
                 } else {
-                    // Less aggressive settings for other formats
-                    options.push('-contrast-stretch', '2%');
-                    options.push('-clahe', '10x10+64+8');
-                    options.push('-brightness-contrast', '-15,20');
-                    options.push('-gamma', '1.1');
-                    options.push('-level', '3%,97%,1.0');
+                    // For uncompressed data, convert directly
+                    result = await this.convertRawToImage(data, dicomData);
                 }
             }
 
-            // Run ImageMagick with contrast enhancement
-            await this.runImageMagickCommand(tempRawPath, absoluteTargetPath, options);
+            // If a target path is specified, save the PNG file
+            if (targetPath) {
+                const base64Data = result.replace(/^data:image\/png;base64,/, '');
+                const binaryData = Buffer.from(base64Data, 'base64');
 
-            // Convert the file to base64 for return
-            const convertedData = await fs.readFile(absoluteTargetPath);
-            result = `data:image/png;base64,${convertedData.toString('base64')}`;
+                // Get the vault path for proper file handling
+                const vaultPath = (this.app.vault.adapter as any).basePath;
+                const absoluteTargetPath = targetPath.startsWith(vaultPath) ?
+                    targetPath : path.join(vaultPath, targetPath);
+
+                // Ensure target directory exists
+                const targetDir = path.dirname(absoluteTargetPath);
+                await fs.mkdir(targetDir, { recursive: true });
+
+                // Create the file in the vault
+                await this.app.vault.createBinary(
+                    targetPath.startsWith(vaultPath) ?
+                        path.relative(vaultPath, targetPath) : targetPath,
+                    binaryData
+                );
+            }
 
             return result;
         } catch (error) {
-            if (error instanceof Error) {
-                const code = (error as any).code;
-                if (code === 'ENAMETOOLONG') {
-                    console.error('ENAMETOOLONG error details:', {
-                        inputFile: {
-                            path: file.path,
-                            length: file.path.length
-                        },
-                        targetPath: targetPath ? {
-                            path: targetPath,
-                            length: targetPath.length
-                        } : undefined,
-                        tempFiles: tempFiles.map(t => ({
-                            path: t,
-                            length: t.length
-                        }))
-                    });
-                }
-                console.error('Conversion failed:', {
-                    error: error.message,
-                    code: (error as any).code,
-                    stack: error.stack
-                });
-            }
+            console.error('Conversion failed:', error);
             throw error;
         } finally {
             // Clean up temporary files
             for (const tempPath of tempFiles) {
                 try {
                     await fs.access(tempPath).then(
-                        () => fs.unlink(tempPath).catch(e => {
-                            console.error('Failed to delete temp file:', e);
-                        }),
+                        () => fs.unlink(tempPath),
                         () => { /* File doesn't exist, no need to delete */ }
                     );
                 } catch (cleanupError) {
-                    console.error('Failed to check/cleanup temp file:', cleanupError);
+                    console.error('Failed to clean up temp file:', cleanupError);
                 }
             }
         }
@@ -414,64 +350,48 @@ export class DICOMService {
         try {
             const columns = dicomData.uint16(DicomTags.Columns) || 0;
             const rows = dicomData.uint16(DicomTags.Rows) || 0;
-
             const bitsAllocated = dicomData.uint16(DicomTags.BitsAllocated) || 16;
             const pixelRepresentation = dicomData.uint16(DicomTags.PixelRepresentation) || 0;
             const samplesPerPixel = dicomData.uint16(DicomTags.SamplesPerPixel) || 1;
 
-            const transferSyntax = dicomData.string(DicomTags.TransferSyntaxUID);
+            const expectedLength = rows * columns * (bitsAllocated / 8);
+            if (pixelData.length < expectedLength) {
+                throw new Error(`Invalid pixel data length. Expected ${expectedLength} bytes but got ${pixelData.length} bytes`);
+            }
 
-            // Create a typed array directly from the buffer with proper offset handling
-            const dataView = new DataView(pixelData.buffer, pixelData.byteOffset, pixelData.length);
+            const transferSyntax = dicomData.string(DicomTags.TransferSyntaxUID);
+            const littleEndian = transferSyntax !== '1.2.840.10008.1.2.2';
+
+            // Create typed array for pixel data
             const pixelCount = rows * columns;
             const pixels = new Int16Array(pixelCount);
+            const view = new DataView(pixelData.buffer, pixelData.byteOffset, pixelData.length);
 
-            // Read pixels with proper endianness handling
-            const littleEndian = transferSyntax !== '1.2.840.10008.1.2.2'; // Everything except Explicit VR Big Endian
-            for (let i = 0; i < pixelCount; i++) {
-                pixels[i] = dataView.getInt16(i * 2, littleEndian);
+            // Read pixels with bounds checking
+            for (let i = 0; i < pixelCount && (i * 2 + 1) < pixelData.length; i++) {
+                pixels[i] = view.getInt16(i * 2, littleEndian);
             }
 
-            // Apply rescale slope and intercept
-            const rescaleSlope = dicomData.floatString(DicomTags.RescaleSlope) || 1;
-            const rescaleIntercept = dicomData.floatString(DicomTags.RescaleIntercept) || 0;
+            // Calculate window settings if not provided
+            let windowCenter = dicomData.floatString(DicomTags.WindowCenter);
+            let windowWidth = dicomData.floatString(DicomTags.WindowWidth);
 
-            // Convert to floating point values
-            const values = new Float32Array(pixelCount);
-            let min = Number.MAX_VALUE;
-            let max = Number.MIN_VALUE;
-
-            for (let i = 0; i < pixelCount; i++) {
-                const value = pixels[i] * rescaleSlope + rescaleIntercept;
-                values[i] = value;
-                min = Math.min(min, value);
-                max = Math.max(max, value);
+            if (!windowCenter || !windowWidth) {
+                // Auto window by scanning min/max values
+                let min = Number.MAX_VALUE;
+                let max = Number.MIN_VALUE;
+                for (let i = 0; i < pixels.length; i++) {
+                    const value = pixels[i];
+                    min = Math.min(min, value);
+                    max = Math.max(max, value);
+                }
+                windowCenter = (max + min) / 2;
+                windowWidth = max - min;
             }
 
-            // Create histogram
-            const histogramBins = 256;
-            const histogram = new Uint32Array(histogramBins);
-            const range = max - min;
-
-            for (let i = 0; i < pixelCount; i++) {
-                const bin = Math.min(
-                    histogramBins - 1,
-                    Math.max(0, Math.floor((values[i] - min) * (histogramBins - 1) / range))
-                );
-                histogram[bin]++;
-            }
-
-            // Calculate cumulative histogram
-            const cdf = new Float32Array(histogramBins);
-            cdf[0] = histogram[0];
-            for (let i = 1; i < histogramBins; i++) {
-                cdf[i] = cdf[i - 1] + histogram[i];
-            }
-
-            // Normalize CDF to [0,1]
-            for (let i = 0; i < histogramBins; i++) {
-                cdf[i] /= pixelCount;
-            }
+            // Convert 16-bit to 8-bit using window/level
+            const lowValue = windowCenter - (windowWidth / 2);
+            const highValue = windowCenter + (windowWidth / 2);
 
             // Create PNG header
             const pngSignature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
@@ -485,57 +405,40 @@ export class DICOMService {
                 0                               // Interlace method
             ]));
 
-            // Create image data
+            // Create image data with proper filter type handling
             const scanlineLength = columns + 1;
             const imageData = Buffer.alloc(rows * scanlineLength);
 
-            // Apply advanced contrast enhancement
+            // Fill image data with normalized pixel values
             let pixelIndex = 0;
-            const clipLimit = 0.1; // Clip histogram at 10% of total pixels per bin
-            const maxClip = pixelCount * clipLimit / histogramBins;
-
             for (let y = 0; y < rows; y++) {
                 imageData[y * scanlineLength] = 0; // Filter type 0 (None)
                 for (let x = 0; x < columns; x++) {
-                    const value = values[pixelIndex++];
-
-                    // Get normalized value using histogram equalization
-                    const bin = Math.min(
-                        histogramBins - 1,
-                        Math.max(0, Math.floor((value - min) * (histogramBins - 1) / range))
-                    );
-
-                    // Use CDF for intensity mapping, but apply contrast limiting
-                    let mappedValue = cdf[bin];
-
-                    // Apply non-linear contrast enhancement
-                    const contrast = 2.0; // Increase contrast
-                    mappedValue = Math.pow(mappedValue, 1 / contrast);
-
-                    // Apply brightness boost
-                    mappedValue = Math.min(1, mappedValue * 1.8); // 80% brightness boost
-
-                    // Convert to 8-bit
-                    const intensity = Math.round(mappedValue * 255);
+                    const pixelValue = pixels[pixelIndex++];
+                    let normalized = (pixelValue - lowValue) / (highValue - lowValue);
+                    normalized = Math.max(0, Math.min(1, normalized));
+                    const intensity = Math.round(normalized * 255);
                     imageData[y * scanlineLength + x + 1] = intensity;
                 }
             }
 
-            // Compress and finish PNG
+            // Compress image data
             const deflate = require('zlib').deflateSync;
             const compressedData = deflate(imageData);
             const idatChunk = this.createPNGChunk('IDAT', compressedData);
             const iendChunk = this.createPNGChunk('IEND', Buffer.alloc(0));
 
-            const finalPngData = Buffer.concat([
+            // Combine all chunks
+            const pngData = Buffer.concat([
                 pngSignature,
                 ihdrChunk,
                 idatChunk,
                 iendChunk
             ]);
 
-            return `data:image/png;base64,${finalPngData.toString('base64')}`;
+            return `data:image/png;base64,${pngData.toString('base64')}`;
         } catch (error) {
+            console.error('Error during raw DICOM conversion:', error);
             throw error;
         }
     }
