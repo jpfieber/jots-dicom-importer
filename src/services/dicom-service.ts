@@ -353,23 +353,42 @@ export class DICOMService {
             const bitsAllocated = dicomData.uint16(DicomTags.BitsAllocated) || 16;
             const pixelRepresentation = dicomData.uint16(DicomTags.PixelRepresentation) || 0;
             const samplesPerPixel = dicomData.uint16(DicomTags.SamplesPerPixel) || 1;
+            const transferSyntax = dicomData.string(DicomTags.TransferSyntaxUID);
 
-            const expectedLength = rows * columns * (bitsAllocated / 8);
-            if (pixelData.length < expectedLength) {
-                throw new Error(`Invalid pixel data length. Expected ${expectedLength} bytes but got ${pixelData.length} bytes`);
+            const rescaleSlope = dicomData.floatString(DicomTags.RescaleSlope) || 1;
+            const rescaleIntercept = dicomData.floatString(DicomTags.RescaleIntercept) || 0;
+
+            // Handle PGM format from OpenJPEG
+            let pixels: Int16Array;
+            if (this.lastTransferSyntax === '1.2.840.10008.1.2.4.90') { // JPEG 2000
+                // Skip PGM header (P5\n + dimensions + max value)
+                let headerEnd = 0;
+                while (headerEnd < pixelData.length && pixelData[headerEnd] !== 0x0a) headerEnd++;
+                headerEnd++; // Skip first newline
+                while (headerEnd < pixelData.length && pixelData[headerEnd] !== 0x0a) headerEnd++;
+                headerEnd++; // Skip second newline
+                while (headerEnd < pixelData.length && pixelData[headerEnd] !== 0x0a) headerEnd++;
+                headerEnd++; // Skip third newline
+
+                // Read PGM data
+                pixels = new Int16Array(rows * columns);
+                for (let i = 0; i < rows * columns; i++) {
+                    pixels[i] = pixelData[headerEnd + i];
+                }
+            } else {
+                // Handle regular DICOM pixel data
+                const littleEndian = transferSyntax !== '1.2.840.10008.1.2.2';
+                pixels = new Int16Array(rows * columns);
+                const view = new DataView(pixelData.buffer, pixelData.byteOffset, pixelData.length);
+
+                for (let i = 0; i < rows * columns && (i * 2 + 1) < pixelData.length; i++) {
+                    pixels[i] = view.getInt16(i * 2, littleEndian);
+                }
             }
 
-            const transferSyntax = dicomData.string(DicomTags.TransferSyntaxUID);
-            const littleEndian = transferSyntax !== '1.2.840.10008.1.2.2';
-
-            // Create typed array for pixel data
-            const pixelCount = rows * columns;
-            const pixels = new Int16Array(pixelCount);
-            const view = new DataView(pixelData.buffer, pixelData.byteOffset, pixelData.length);
-
-            // Read pixels with bounds checking
-            for (let i = 0; i < pixelCount && (i * 2 + 1) < pixelData.length; i++) {
-                pixels[i] = view.getInt16(i * 2, littleEndian);
+            // Apply rescale slope and intercept
+            for (let i = 0; i < pixels.length; i++) {
+                pixels[i] = pixels[i] * rescaleSlope + rescaleIntercept;
             }
 
             // Calculate window settings if not provided
@@ -381,15 +400,14 @@ export class DICOMService {
                 let min = Number.MAX_VALUE;
                 let max = Number.MIN_VALUE;
                 for (let i = 0; i < pixels.length; i++) {
-                    const value = pixels[i];
-                    min = Math.min(min, value);
-                    max = Math.max(max, value);
+                    min = Math.min(min, pixels[i]);
+                    max = Math.max(max, pixels[i]);
                 }
                 windowCenter = (max + min) / 2;
                 windowWidth = max - min;
             }
 
-            // Convert 16-bit to 8-bit using window/level
+            // Convert to 8-bit using window/level
             const lowValue = windowCenter - (windowWidth / 2);
             const highValue = windowCenter + (windowWidth / 2);
 
@@ -415,7 +433,8 @@ export class DICOMService {
                 imageData[y * scanlineLength] = 0; // Filter type 0 (None)
                 for (let x = 0; x < columns; x++) {
                     const pixelValue = pixels[pixelIndex++];
-                    let normalized = (pixelValue - lowValue) / (highValue - lowValue);
+                    // Apply windowing transformation
+                    let normalized = (pixelValue - lowValue) / windowWidth;
                     normalized = Math.max(0, Math.min(1, normalized));
                     const intensity = Math.round(normalized * 255);
                     imageData[y * scanlineLength + x + 1] = intensity;
