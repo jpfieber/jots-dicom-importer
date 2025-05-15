@@ -123,14 +123,22 @@ export class BatchProcessor {
                     const gifPath = PathService.joinPath(group.targetPath, `${seriesName}.gif`);
                     try {
                         await this.dicomService.createAnimatedGif(imagesPath, gifPath);
+                        
+                        // Small delay to ensure file system has registered the new GIF
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        
+                        // Create or update metadata note after GIF is created
+                        await this.metadataService.createMetadataNote(group.dicomData, group.targetPath);
                     } catch (error) {
                         console.error(`Failed to create GIF for series: ${error}`);
+                        // Still create metadata note even if GIF fails
+                        await this.metadataService.createMetadataNote(group.dicomData, group.targetPath);
                     }
+                } else {
+                    // Create metadata note without GIF
+                    await this.metadataService.createMetadataNote(group.dicomData, group.targetPath);
                 }
             }
-
-            // Create or update metadata note
-            await this.metadataService.createMetadataNote(group.dicomData, group.targetPath);
 
             // Archive original files if enabled
             if (this.settings.archiveDicomFiles) {
